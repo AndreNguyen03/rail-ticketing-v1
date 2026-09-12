@@ -1,22 +1,22 @@
 # 02 — Architecture
 
-## 1. C4 Level 1 — System Context
+## 1. C4 Level 1 — System context
 
 ```mermaid
 graph TB
-    PAX["👤 Hành khách<br/>Web + Mobile"]
-    SCALPER["🤖 Bot cò vé<br/><i>đối thủ có chủ đích</i>"]
-    OPS["🎫 Nhân viên ga<br/>quầy bán, soát vé"]
-    ADMIN["⚙️ Điều độ<br/>lập lịch tàu"]
+    PAX["👤 Passenger<br/>Web + mobile"]
+    SCALPER["🤖 Scalper bot<br/><i>a deliberate adversary</i>"]
+    OPS["🎫 Station staff<br/>counter sales, gate checks"]
+    ADMIN["⚙️ Operations<br/>trip scheduling"]
 
-    SYS["<b>RAIL TICKETING</b><br/>Hệ thống bán vé"]
+    SYS["<b>RAIL TICKETING</b><br/>Ticketing system"]
 
     VNPAY["VNPay / MoMo / ZaloPay"]
-    SMS["SMS Brandname / Zalo OA"]
-    CCCD["Xác thực định danh<br/>(VNeID / mock)"]
+    SMS["SMS brandname / Zalo OA"]
+    CCCD["Identity verification<br/>(VNeID / mock)"]
 
     PAX --> SYS
-    SCALPER -.->|tấn công| SYS
+    SCALPER -.->|attacks| SYS
     OPS --> SYS
     ADMIN --> SYS
     SYS --> VNPAY
@@ -27,21 +27,21 @@ graph TB
     style SCALPER fill:#444,color:#fff
 ```
 
-**Bot cò vé được vẽ vào sơ đồ context có chủ đích.** Đa số thiết kế bỏ qua đối thủ, rồi
-xử lý như một mục "bảo mật" phụ. Ở domain này, cò vé là **tác nhân chính**: nó quyết định
-thiết kế phòng chờ, quota, và cả luồng xác thực.
+**The scalper bot is on the context diagram on purpose.** Most designs ignore the adversary
+and then bolt on a "security" section. Here the scalper is a **primary actor**: it dictates
+the waiting room design, the quota model, and the authentication flow.
 
-### Suy giảm khi phụ thuộc ngoài hỏng
+### Degrading when a dependency fails
 
-| Hệ thống ngoài | Hỏng thì sao |
+| External system | If it fails |
 |---|---|
-| VNPay/MoMo | Hold vẫn giữ; báo khách thử lại; **đối soát bắt buộc** khi cổng tỉnh lại |
-| SMS/Zalo | Xếp hàng gửi lại. Vé vẫn xem được trong app |
-| Xác thực định danh | **Chặn bán** — không xác thực được thì không chống được cò vé. Đây là phụ thuộc cứng duy nhất |
+| VNPay/MoMo | Holds stay; tell the passenger to retry; **reconciliation is mandatory** once the gateway recovers |
+| SMS/Zalo | Queue for redelivery. Tickets remain visible in the app |
+| Identity verification | **Stop selling** — without verification there is no defence against scalpers. The only hard dependency |
 
 ---
 
-## 2. C4 Level 2 — Container
+## 2. C4 Level 2 — Containers
 
 ```mermaid
 graph TB
@@ -49,18 +49,18 @@ graph TB
         WEB["React web<br/>+ mobile PWA"]
     end
 
-    subgraph QUEUE["🚪 QUEUE PLANE — hấp thụ đợt sóng"]
+    subgraph QUEUE["🚪 QUEUE PLANE — absorb the surge"]
         GW["api-gateway<br/><i>Spring Cloud Gateway</i>"]
-        WR["waiting-room<br/><i>Go</i><br/>500k kết nối chờ"]
+        WR["waiting-room<br/><i>Go</i><br/>500k waiting connections"]
     end
 
-    subgraph CATALOG["📅 CATALOG PLANE — đọc 10.000:1"]
+    subgraph CATALOG["📅 CATALOG PLANE — 10,000:1 reads"]
         SCH["schedule-service<br/><i>Java · PG + Redis</i>"]
         FAR["fare-service<br/><i>Java · PG</i>"]
     end
 
     subgraph CONT["🔥 CONTENTION PLANE"]
-        INV["<b>inventory-service</b><br/><i>Java</i><br/>phân vùng theo CHUYẾN"]
+        INV["<b>inventory-service</b><br/><i>Java</i><br/>partitioned by TRIP"]
         BKG["booking-service<br/><i>Java · PG</i><br/>saga orchestrator"]
         QTA["quota-service<br/><i>Java · Redis + PG</i>"]
     end
@@ -76,8 +76,8 @@ graph TB
         RCN["reconciliation<br/><i>Java · PG</i>"]
     end
 
-    RDS[("<b>Redis Cluster</b><br/>tồn kho nóng<br/>shard theo tripId")]
-    PG[("PostgreSQL<br/>nguồn sự thật")]
+    RDS[("<b>Redis Cluster</b><br/>hot inventory<br/>sharded by tripId")]
+    PG[("PostgreSQL<br/>source of truth")]
     KFK(["Kafka"])
 
     WEB --> GW
@@ -88,14 +88,14 @@ graph TB
     BKG --> QTA
     BKG --> FAR
     BKG --> PAY
-    INV <-->|Lua atomic| RDS
+    INV <-->|atomic Lua| RDS
     INV --> PG
     PAY --> KFK
     KFK --> TKT --> NOT
     REF --> INV
-    RCN -.->|so sánh| RDS
-    RCN -.->|so sánh| PG
-    RCN -.->|sửa| INV
+    RCN -.->|compare| RDS
+    RCN -.->|compare| PG
+    RCN -.->|repair| INV
 
     style CONT fill:#b5651d,color:#fff
     style INV fill:#8b2500,color:#fff
@@ -104,180 +104,187 @@ graph TB
 
 ---
 
-## 3. Vì sao chia theo **hình dạng tải**
+## 3. Why split by **load shape**
 
-Cách chia service thông thường — theo thực thể (`user`, `booking`, `ticket`) — che mất điều quan trọng nhất ở đây: bốn nhóm chức năng có **hình dạng tải và yêu cầu nhất quán khác nhau về bản chất**, và chúng scale theo những cách không tương thích với nhau.
+The usual split — by entity (`user`, `booking`, `ticket`) — hides what matters most here:
+these groups have **fundamentally different load shapes and consistency needs**, and they
+scale in mutually incompatible ways.
 
-| Plane | Tải | Nhất quán | Scale bằng | Hỏng thì |
+| Plane | Load | Consistency | Scales by | If it fails |
 |---|---|---|---|---|
-| **Queue** | 500k kết nối đồng thời, CPU gần 0 | Không cần | Thêm pod (nhiều kết nối) | Sóng đập thẳng vào backend |
-| **Catalog** | Đọc 10.000:1, dữ liệu **lạnh** (lịch tàu không đổi) | Eventual, TTL 24h | Cache + replica | Không tra được chuyến |
-| **Contention** | Ghi tranh chấp cực cao vào **cùng vài dòng** | **Tuyến tính hoá** | **Phân vùng theo chuyến** | ⛔ Bán thừa vé |
-| **Fulfillment** | Ghi vừa phải, chịu được chậm | Eventual | Consumer group | Vé giao chậm |
-| **Recovery** | Batch nền | Eventual | Không cần | Sai lệch tích tụ âm thầm |
+| **Queue** | 500k concurrent connections, almost no CPU | None needed | More pods (more connections) | The surge hits the backend directly |
+| **Catalog** | 10,000:1 reads, **cold** data (schedules do not change) | Eventual, 24h TTL | Cache + replicas | Trips cannot be searched |
+| **Contention** | Extremely contended writes to **the same few rows** | **Linearizable** | **Partition by trip** | ⛔ Overselling |
+| **Fulfillment** | Moderate writes, tolerates delay | Eventual | Consumer groups | Tickets arrive late |
+| **Recovery** | Background batch | Eventual | Not needed | Drift accumulates silently |
 
-**Điểm mấu chốt: Contention plane không scale bằng cách thêm replica.** Thêm 100 pod cho
-`inventory-service` **làm chậm hơn** nếu chúng tranh cùng một dòng. Nó scale bằng
-**phân vùng theo `tripId`** — mỗi chuyến là một miền tranh chấp độc lập.
+**The crux: the contention plane does not scale by adding replicas.** Adding 100 pods to
+`inventory-service` makes it **slower** if they contend for the same row. It scales by
+**partitioning on `tripId`** — each trip is an independent contention domain.
 
 ```
-Sai:     100 pod  ──▶ cùng 1 dòng tồn kho  ──▶ khoá xếp chồng, throughput ↓
-Đúng:    100 pod  ──▶ 200 chuyến, mỗi pod lo 2 chuyến  ──▶ 0 tranh chấp giữa pod
+Wrong:   100 pods  ──▶ one inventory row       ──▶ locks queue, throughput ↓
+Right:   100 pods  ──▶ 200 trips, 2 per pod    ──▶ zero contention between pods
 ```
 
-Đây là bài học trung tâm của cả dự án: **tranh chấp giải bằng phân vùng, không bằng nhân bản.**
+This is the central lesson of the project: **contention is solved by partitioning, not by
+replication.**
 
 ---
 
-## 4. Kiến trúc hai tầng của tồn kho
+## 4. The two-tier inventory architecture
 
-Trái tim hệ thống. Không có tầng nào một mình đủ.
+The heart of the system. Neither tier is sufficient alone.
 
 ```
               ┌─────────────────────────────────────┐
-   ĐƯỜNG NÓNG │  REDIS  — shard theo tripId         │
-   (giữ chỗ)  │  · Script Lua = nguyên tử           │
-              │  · 4 KB/chuyến, vừa 1 lệnh          │
-              │  · ~25.000 op/giây/shard            │
-              │  · ❌ mất khi Redis chết             │
+    HOT PATH  │  REDIS  — sharded by tripId         │
+    (holds)   │  · Lua script = atomic              │
+              │  · 4 KB per trip, one command       │
+              │  · ~25,000 ops/s per shard          │
+              │  · ❌ lost when Redis dies           │
               └──────────────┬──────────────────────┘
-                             │ ghi bất đồng bộ (outbox)
+                             │ asynchronous write (outbox)
                              ▼
               ┌─────────────────────────────────────┐
-   ĐƯỜNG NGUỘI│  POSTGRESQL — nguồn sự thật         │
-   (bền vững) │  · Vé đã thanh toán ghi ĐỒNG BỘ     │
-              │  · CHECK ràng buộc chống chồng chặng│
-              │  · ✅ bền, có backup, PITR           │
+    COLD PATH │  POSTGRESQL — source of truth       │
+    (durable) │  · Paid tickets written SYNCHRONOUSLY│
+              │  · Constraint prevents leg overlap  │
+              │  · ✅ durable, backed up, PITR       │
               └──────────────┬──────────────────────┘
                              │
                              ▼
               ┌─────────────────────────────────────┐
-   TRỌNG TÀI  │  RECONCILIATION — mỗi 60 giây       │
-              │  So bitmask Redis vs PostgreSQL     │
-              │  Lệch ⇒ PostgreSQL thắng, sửa Redis │
-              │  Ghi kiểm toán + cảnh báo           │
+    REFEREE   │  RECONCILIATION — every 60 seconds  │
+              │  Compare Redis vs PostgreSQL masks  │
+              │  On drift, PostgreSQL wins          │
+              │  Audit record + alert               │
               └─────────────────────────────────────┘
 ```
 
-**Quy tắc phân chia rủi ro:**
+**The risk-partitioning rule:**
 
-| Trạng thái | Mất được không? | Lưu ở đâu |
+| State | Can it be lost? | Stored in |
 |---|---|---|
-| Hold **chưa thanh toán** | ✅ Được — khách thử lại | Redis (TTL) |
-| Booking **đang chờ thanh toán** | ⚠️ Hạn chế | Redis + PostgreSQL async |
-| Vé **đã thanh toán** | ❌ **Không bao giờ** | **PostgreSQL đồng bộ**, rồi mới xác nhận |
+| **Unpaid** hold | ✅ Yes — the passenger retries | Redis (TTL) |
+| Booking **awaiting payment** | ⚠️ Limited | Redis + PostgreSQL, async |
+| **Paid** ticket | ❌ **Never** | **PostgreSQL synchronously**, then acknowledge |
 
-Đây là chỗ đánh đổi CAP hiện ra cụ thể: chấp nhận mất hold (nhanh) để đổi lấy không bao giờ
-mất vé đã trả tiền (bền). Chi tiết: [04 §5–6](04-contention-strategies.md).
+This is where the CAP trade-off becomes concrete: accept losing holds (fast) in exchange
+for never losing a paid ticket (durable). Detail:
+[04 §5–6](04-contention-strategies.md).
 
 ---
 
-## 5. Phòng chờ ảo — vì sao nó là service riêng
+## 5. The virtual waiting room — why it is its own service
 
-500.000 người ở giây thứ 0. Không backend nào chịu nổi. Phòng chờ **hấp thụ sóng và xả đều**:
+500,000 people at second zero. No backend survives that. The waiting room **absorbs the
+wave and releases it evenly**:
 
 ```
-500.000 người ─▶ waiting-room ─▶ xả 2.000/giây ─▶ backend thấy tải ĐỀU
-                  (Go, ~500 MB RAM)                 (như ngày thường ×40)
+500,000 people ─▶ waiting-room ─▶ release 2,000/s ─▶ backend sees EVEN load
+                  (Go, ~500 MB RAM)                   (like a normal day ×40)
 ```
 
-| Thuộc tính | Vì sao |
+| Property | Why |
 |---|---|
-| **Go, không phải Java** | 500k kết nối SSE/WebSocket. Go ~1 KB/goroutine; JVM thread hoặc reactive context tốn gấp nhiều lần. Đây là lý do kỹ thuật cụ thể, không phải sở thích |
-| **Không có database** | Redis sorted set là đủ. Thêm DB là thêm điểm hỏng ở chỗ chịu tải nặng nhất |
-| **Không biết gì về vé** | Chỉ cấp token vào cửa. Tách hoàn toàn khỏi miền nghiệp vụ |
-| **Xác thực CCCD trước khi vào hàng** | Nếu không, bot lấy 10.000 slot hàng đợi và mọi thứ phía sau vô nghĩa |
+| **Go, not Java** | 500k SSE/WebSocket connections. Go costs ~1 KB per goroutine; a JVM thread or reactive context costs many times that. A concrete engineering reason, not a preference |
+| **No database** | A Redis sorted set is enough. A database would add a failure point at the most loaded place in the system |
+| **Knows nothing about tickets** | It only issues an admission token. Fully decoupled from the domain |
+| **Identity verified before queueing** | Otherwise bots take 10,000 queue slots and everything downstream is pointless |
 
-Tốc độ xả là **cần gạt vận hành**: thấy `inventory-service` p99 tăng thì giảm tốc độ xả.
-Đây là backpressure ở tầng sản phẩm, và nó hiệu quả hơn mọi circuit breaker.
+The release rate is an **operational lever**: when `inventory-service` p99 climbs, slow the
+release. This is backpressure at the product layer, and it beats every circuit breaker.
 
 ---
 
-## 6. Bảng quyết định công nghệ
+## 6. Technology decisions
 
-| Quyết định | Chọn | Đã cân nhắc | Lý do |
+| Decision | Choice | Also considered | Reason |
 |---|---|---|---|
-| Tồn kho đường nóng | **Redis + Lua** | Postgres thuần, Hazelcast, in-memory | Lua chạy nguyên tử single-thread ⇒ **không cần khoá**. 4 KB/chuyến vừa một lệnh |
-| Nguồn sự thật | **PostgreSQL** | Cassandra, DynamoDB | Cần transaction thật cho booking + tiền. Ràng buộc CHECK chống chồng chặng |
-| Phòng chờ | **Go** | Java WebFlux, Nginx+Lua | 500k kết nối rỗi — RAM/kết nối là chỉ số quyết định |
-| Phần còn lại | **Java 21 + Spring Boot** | — | Virtual threads hợp service I/O-bound; hệ sinh thái |
-| Event | **Kafka** | RabbitMQ, NATS | Phân vùng theo `tripId` cho **thứ tự trong một chuyến**; replay khi dựng lại tồn kho |
-| Load test | **k6** | JMeter, Gatling | Viết bằng JS, dễ mô phỏng 10k VU tranh 500 chỗ |
-| Chống bot | **Định danh + quota**, không phải IP | Cloudflare, captcha | Cò vé xoay IP dễ; xoay CCCD khó |
-| Deploy | **k3d local** | Cloud managed K8s | Toàn bộ dự án chạy được trên laptop 16 GB, $0. Tranh chấp mô phỏng được ở local; chỉ độ trễ mạng thật là không |
+| Hot inventory path | **Redis + Lua** | Plain Postgres, Hazelcast, in-memory | Lua runs single-threaded and atomically ⇒ **no locks needed**. 4 KB per trip fits one command |
+| Source of truth | **PostgreSQL** | Cassandra, DynamoDB | Booking and money need real transactions. A constraint prevents leg overlap |
+| Waiting room | **Go** | Java WebFlux, Nginx+Lua | 500k idle connections — RAM per connection is the deciding metric |
+| Everything else | **Java 21 + Spring Boot** | — | Virtual threads suit I/O-bound services; ecosystem |
+| Events | **Kafka** | RabbitMQ, NATS | Partitioning by `tripId` gives **ordering within a trip**; replay rebuilds inventory |
+| Load testing | **k6** | JMeter, Gatling | JavaScript, easy to simulate 10k VUs fighting over 500 berths |
+| Bot defence | **Identity + quota**, not IP | Cloudflare, captcha | Rotating IPs is easy; rotating national IDs is hard |
+| Deployment | **k3d, local** | Managed cloud K8s | The whole project runs on a 16 GB laptop for $0. Contention reproduces locally; only real network latency does not |
 
-### Vì sao Redis Lua thay vì khoá phân tán (Redlock)
+### Why Redis Lua instead of a distributed lock (Redlock)
 
-Redlock giải bài toán *khoá*, nhưng ở đây ta không cần khoá — ta cần **thao tác nguyên tử**.
-Redis chạy Lua đơn luồng: script `kiểm tra mask → chọn chỗ → set bit → trả về` chạy trọn vẹn
-không bị xen. Không có khoá để lấy, không có khoá để nhả, không có khoá hết hạn sai lúc.
+Redlock solves *locking*, but we do not need a lock — we need an **atomic operation**.
+Redis runs Lua single-threaded: a script that does `check mask → pick berth → set bits →
+return` runs to completion without interleaving. No lock to acquire, none to release, none
+to expire at the wrong moment.
 
-Một lệnh, ~80 µs, đúng tuyệt đối trong phạm vi một shard.
+One command, ~80 µs, absolutely correct within one shard.
 
 ---
 
-## 7. Phân vùng — chi tiết quyết định khả năng scale
+## 7. Partitioning — the detail that decides whether this scales
 
 ```
 tripId = "SE1-2026-02-14"
        │
-       ├─ Redis:   hash slot theo {tripId}  ⇒ toàn bộ chỗ của chuyến ở CÙNG node
-       ├─ Kafka:   partition = hash(tripId) ⇒ thứ tự event trong chuyến được bảo đảm
-       └─ Pod:     consistent hashing       ⇒ mỗi pod "sở hữu" một tập chuyến
+       ├─ Redis:  hash slot on {tripId}  ⇒ all berths of a trip on the SAME node
+       ├─ Kafka:  partition = hash(tripId) ⇒ event ordering within a trip
+       └─ Pod:    consistent hashing      ⇒ each pod "owns" a set of trips
 ```
 
-**Hashtag Redis `{tripId}` là bắt buộc.** Không có nó, các chỗ của cùng một chuyến rải ra
-nhiều node ⇒ script Lua không chạy được (Lua chỉ thao tác được key trên cùng slot).
+**The Redis hashtag `{tripId}` is mandatory.** Without it, a trip's berths scatter across
+nodes and the Lua script cannot run — Lua may only touch keys in the same slot.
 
-Kết quả: **200 chuyến = 200 miền tranh chấp độc lập.** Tải tổng 500k/phút chia ra
-~2.500/phút mỗi chuyến — hoàn toàn trong tầm của một shard Redis.
+Result: **200 trips = 200 independent contention domains.** A total load of 500k/minute
+becomes ~2,500/minute per trip, comfortably inside one Redis shard.
 
-Nghẽn còn lại: **một chuyến hot** (SE1 chiều 26 Tết). Đó là giới hạn vật lý của bài toán,
-và là lý do phòng chờ tồn tại — nó rải cùng lượng nhu cầu đó ra theo thời gian.
+The remaining bottleneck: **one hot trip** (SE1 on the 26th day of the lunar year). That is
+a physical limit of the problem, and it is why the waiting room exists — it spreads the same
+demand over time.
 
 ---
 
-## 8. Khả năng chịu lỗi
+## 8. Fault tolerance
 
-| Mẫu | Áp dụng | Cấu hình |
+| Pattern | Applied to | Configuration |
 |---|---|---|
-| **Backpressure ở tầng sản phẩm** | waiting-room | Giảm tốc độ xả khi p99 tăng — hiệu quả nhất |
-| Timeout giảm dần vào trong | Toàn hệ | Gateway 8s > booking 5s > inventory 800ms > Redis 200ms |
-| Idempotency | Mọi lệnh ghi | `Idempotency-Key`, Redis 24h |
-| Outbox | Mọi service publish | Bảng `outbox` cùng transaction + CDC |
-| **Đối soát** | Redis ↔ PostgreSQL | Mỗi 60 giây, PostgreSQL thắng |
-| Circuit breaker | Gọi payment | Cổng thanh toán chậm không được kéo sập booking |
-| **Chế độ tự động gán chỗ** | inventory | Bật khi tỉ lệ từ chối > 30% — giảm tranh chấp bằng sản phẩm |
+| **Product-layer backpressure** | waiting-room | Slow the release rate when p99 climbs — the most effective lever |
+| Timeouts decreasing inward | Everywhere | Gateway 8s > booking 5s > inventory 800ms > Redis 200ms |
+| Idempotency | Every write | `Idempotency-Key`, retained 24h |
+| Outbox | Every publishing service | An `outbox` table in the same transaction + CDC |
+| **Reconciliation** | Redis ↔ PostgreSQL | Every 60 seconds, PostgreSQL wins |
+| Circuit breaker | Payment calls | A slow payment gateway must not drag booking down |
+| **Automatic berth assignment** | inventory | Enabled when the rejection rate exceeds 30% — contention reduced by product design |
 
-**Thứ tự hy sinh khi quá tải:**
+**Order of sacrifice under overload:**
 
 ```
-1. Tắt chế độ tự chọn chỗ → chuyển tự động gán    ← giảm tranh chấp ngay
-2. Giảm tốc độ xả phòng chờ
-3. Tắt tra cứu chỗ trống chi tiết (chỉ hiện "còn/hết")
-4. Tắt đổi vé (giữ trả vé)
-5. ─── không bao giờ hy sinh ───
-   · Xuất vé cho đơn ĐÃ THANH TOÁN
-   · Đối soát
+1. Disable pick-your-own berth → switch to automatic assignment  ← cuts contention immediately
+2. Slow the waiting room release rate
+3. Disable detailed availability (show only "available / sold out")
+4. Disable exchanges (keep refunds)
+5. ─── never sacrificed ───
+   · Issuing tickets for PAID orders
+   · Reconciliation
 ```
 
 ---
 
-## 9. Bảo mật & chống gian lận
+## 9. Security and fraud
 
-| Lớp | Biện pháp |
+| Layer | Measure |
 |---|---|
-| Vào phòng chờ | Bắt buộc xác thực định danh **trước**, không phải lúc thanh toán |
-| Quota | 4 vé/CCCD/chiều/đợt. Kiểm ở Redis (nóng) + PostgreSQL (bền) |
-| Phát hiện cụm | Nhiều CCCD cùng thiết bị / cùng số điện thoại nhận vé / cùng cách trả tiền ⇒ gắn cờ |
-| Vé gắn danh tính | Soát vé đối chiếu CCCD ⇒ vé bán lại không dùng được |
-| Rate limit | Theo **danh tính**, không theo IP |
-| Kiểm toán | Mọi lần `reconciliation` sửa tồn kho ghi log bất biến |
+| Entering the queue | Identity verification **first**, not at payment |
+| Quota | 4 tickets per ID per direction per sale window. Checked in Redis (hot) + PostgreSQL (durable) |
+| Cluster detection | Many IDs from one device / one phone number receiving tickets / one payment instrument ⇒ flag |
+| Identity-bound tickets | Gate checks match the national ID ⇒ a resold ticket is unusable |
+| Rate limiting | By **identity**, not by IP |
+| Audit | Every inventory repair by `reconciliation` writes an immutable log entry |
 
-> **Thừa nhận trung thực:** không chặn được 100% cò vé. CCCD mượn/thuê là có thật.
-> Mục tiêu là **nâng chi phí tấn công** và **giới hạn thiệt hại**, không phải diệt tận gốc.
-> Thiết kế nào hứa diệt tận gốc là thiết kế chưa hiểu bài toán.
+> **An honest admission:** scalping cannot be stopped completely. Borrowed and rented IDs
+> are real. The goal is to **raise the cost of attack** and **cap the damage**, not to
+> eliminate it. A design that promises elimination has not understood the problem.
 
 ---
 
-**Tiếp theo:** [03 — Segment Inventory Engine](03-segment-inventory-engine.md)
+**Next:** [03 — Segment Inventory Engine](03-segment-inventory-engine.md)

@@ -1,39 +1,41 @@
 # 03 — Segment Inventory Engine
 
-> Trái tim hệ thống. Mọi service khác tồn tại để phục vụ hoặc bảo vệ nó.
+> The heart of the system. Every other service exists to serve it or protect it.
 >
-> Bài toán: **một chỗ, nhiều khách, không được chồng chặng** — dưới 10.000 request đồng thời.
+> The problem: **one berth, several passengers, no overlapping legs** — under 10,000
+> concurrent requests.
 
 ---
 
-## 1. Vì sao "còn/hết" là mô hình sai
+## 1. Why "available / sold out" is the wrong model
 
-Vé máy bay: một ghế, một chuyến bay, một khách. Boolean.
+An airline seat: one seat, one flight, one passenger. A boolean.
 
-Vé tàu Bắc–Nam: **một giường có thể bán cho 5 khách khác nhau trong cùng một chuyến.**
+A North–South train berth: **one bunk can be sold to five different passengers on the same
+trip.**
 
 ```
-SE1 · 14/02/2026 · Giường 12, toa 5, tầng 1
+SE1 · 2026-02-14 · Bunk 12, carriage 5, level 1
 
-HN ─── Vinh ─── Huế ─── ĐN ─── NT ─── SG
+HN ─── Vinh ─── Hue ─── DN ─── NT ─── SG
  0      1       2       3      4      5
- └─ Khách A ────┘
-                 └──────┘ trống
-                          └─ Khách B ──┘
+ └─ Passenger A ┘
+                 └──────┘ free
+                          └─ Passenger B ┘
 
-Cùng một giường. Hai vé. Hoàn toàn hợp lệ.
-Khách A xuống ở Huế, nhân viên thay ga giường, khách B lên ở Đà Nẵng.
+One bunk. Two tickets. Entirely valid.
+A leaves at Hue, staff change the linen, B boards at Da Nang.
 ```
 
-Mô hình `available: true/false` không diễn đạt được điều này. Và nếu bạn mô hình sai ở đây,
-**mọi thứ phía trên đều sai** — hiển thị sai, đặt chỗ sai, doanh thu mất 40% vì bán một
-giường cho một khách thay vì ba.
+An `available: true/false` model cannot express this. And if the model is wrong here,
+**everything above it is wrong** — wrong display, wrong reservations, and ~40% of revenue
+lost by selling a bunk to one passenger instead of three.
 
 ---
 
-## 2. Ba cách mô hình hoá — và vì sao chọn cách thứ ba
+## 2. Three ways to model it — and why the third wins
 
-### Cách 1 — Một dòng cho mỗi (chỗ × chặng)
+### Option 1 — One row per (berth × leg)
 
 ```sql
 CREATE TABLE berth_leg (
@@ -43,16 +45,17 @@ CREATE TABLE berth_leg (
 );
 ```
 
-| Vấn đề | Con số |
+| Problem | Number |
 |---|---|
-| Số dòng | 500 chỗ × 29 chặng = **14.500 dòng/chuyến** · 200 chuyến × 20 ngày = **58 triệu dòng** |
-| Một lần giữ chỗ | `UPDATE` 5–29 dòng trong một transaction |
-| Deadlock | Hai request khoá các chặng **theo thứ tự khác nhau** ⇒ deadlock. Phải ép thứ tự khoá |
-| Đếm chỗ trống | `GROUP BY berth_id HAVING count(*) = 29` — quét toàn bộ |
+| Rows | 500 berths × 29 legs = **14,500 rows/trip** · 200 trips × 20 days = **58 million rows** |
+| One hold | `UPDATE` of 5–29 rows in one transaction |
+| Deadlock | Two requests lock legs **in different orders** ⇒ deadlock. Lock ordering must be forced |
+| Counting availability | `GROUP BY berth_id HAVING count(*) = 29` — a full scan |
 
-**Loại.** Đúng về logic, nhưng mỗi thao tác chạm hàng chục dòng — đúng thứ bạn không muốn khi có 10.000 request tranh nhau.
+**Rejected.** Logically correct, but every operation touches dozens of rows — exactly what
+you do not want with 10,000 competing requests.
 
-### Cách 2 — Khoảng + ràng buộc loại trừ của PostgreSQL
+### Option 2 — Ranges plus a PostgreSQL exclusion constraint
 
 ```sql
 CREATE TABLE berth_reservation (
@@ -66,128 +69,133 @@ CREATE TABLE berth_reservation (
 );
 ```
 
-PostgreSQL **tự đảm bảo** không có hai đặt chỗ nào chồng chặng trên cùng một giường. Ràng buộc ở tầng database, không thể lách.
+PostgreSQL **guarantees** that no two reservations overlap on the same bunk. The constraint
+lives in the database and cannot be bypassed.
 
-| Ưu | Nhược |
+| Pro | Con |
 |---|---|
-| ✅ Đúng tuyệt đối, không cần code giữ bất biến | ❌ ~200 giữ chỗ/giây khi tranh chấp cao |
-| ✅ Chỉ 1 dòng mỗi đặt chỗ | ❌ Chỉ số GiST là điểm nghẽn ghi |
-| ✅ Rất dễ hiểu | ❌ Đếm chỗ trống vẫn tốn |
+| ✅ Absolutely correct, no code needed to hold the invariant | ❌ ~200 holds/s under high contention |
+| ✅ One row per reservation | ❌ The GiST index is a write bottleneck |
+| ✅ Very easy to understand | ❌ Counting availability is still expensive |
 
-**Giữ lại — nhưng cho đường nguội.** Đây là ràng buộc bền vững ở PostgreSQL ([02 §4](02-architecture.md)). Nó là lưới an toàn cuối cùng: kể cả Redis sai, database vẫn từ chối ghi chồng chặng.
+**Kept — but for the cold path.** This is the durable constraint in PostgreSQL
+([02 §4](02-architecture.md)). It is the last safety net: even if Redis is wrong, the
+database refuses an overlapping write.
 
-### Cách 3 — Bitmask ⭐
+### Option 3 — Bitmask ⭐
 
-Mỗi chỗ: **hai số nguyên 32 bit**.
+Per berth: **two 32-bit integers**.
 
 ```
-occupiedMask  bit i = 1  ⇔  chặng L_i đã BÁN
-heldMask      bit i = 1  ⇔  chặng L_i đang GIỮ TẠM
+occupiedMask  bit i = 1  ⇔  leg L_i is SOLD
+heldMask      bit i = 1  ⇔  leg L_i is temporarily HELD
 ```
 
-| Thao tác | Phép tính |
+| Operation | Expression |
 |---|---|
-| Hành trình từ ga `a` đến ga `b` | `mask = (1 << b) - (1 << a)` |
-| Chỗ có trống cho hành trình không? | `((occupied \| held) & mask) == 0` |
-| Giữ chỗ | `held \|= mask` |
-| Xác nhận (đã trả tiền) | `held &= ~mask ; occupied \|= mask` |
-| Nhả (hết hạn / huỷ) | `held &= ~mask` |
-| Trả vé | `occupied &= ~mask` |
+| Journey from station `a` to station `b` | `mask = (1 << b) - (1 << a)` |
+| Is the berth free for this journey? | `((occupied \| held) & mask) == 0` |
+| Hold | `held \|= mask` |
+| Confirm (paid) | `held &= ~mask ; occupied \|= mask` |
+| Release (expiry / cancel) | `held &= ~mask` |
+| Refund | `occupied &= ~mask` |
 
-Kiểm chứng công thức mask:
+Checking the mask formula:
 
 ```
-a=0, b=2  (HN → Huế)   (1<<2)-(1<<0) = 4-1  = 3  = 0b00011  → chặng L0, L1  ✓
-a=3, b=5  (ĐN → SG)    (1<<5)-(1<<3) = 32-8 = 24 = 0b11000  → chặng L3, L4  ✓
-0b00011 & 0b11000 = 0                                        → không xung đột ✓
+a=0, b=2  (HN → Hue)   (1<<2)-(1<<0) = 4-1  = 3  = 0b00011  → legs L0, L1  ✓
+a=3, b=5  (DN → SG)    (1<<5)-(1<<3) = 32-8 = 24 = 0b11000  → legs L3, L4  ✓
+0b00011 & 0b11000 = 0                                       → no conflict  ✓
 ```
 
-**Mọi thao tác là một lệnh CPU.** Không join, không quét, không khoá hàng, không deadlock.
+**Every operation is a single CPU instruction.** No joins, no scans, no row locks, no
+deadlocks.
 
 ---
 
-## 3. Phát hiện quyết định toàn bộ kiến trúc
+## 3. The observation that decides the architecture
 
-Tuyến dài nhất Việt Nam — Hà Nội ↔ Sài Gòn — có khoảng 30 ga dừng ⇒ **29 chặng ⇒ vừa `int32`**.
+Vietnam's longest line — Hanoi ↔ Saigon — has about 30 stops ⇒ **29 legs ⇒ fits in
+`int32`**.
 
-Một chuyến ~500 chỗ:
+A trip has ~500 berths:
 
 $$
-500 \text{ chỗ} \times (4 + 4) \text{ byte} = \mathbf{4\ KB}
+500 \text{ berths} \times (4 + 4) \text{ bytes} = \mathbf{4\ KB}
 $$
 
-**Toàn bộ tồn kho một chuyến tàu = 4 KB.**
+**A whole trip's inventory is 4 KB.**
 
-Hệ quả xâu chuỗi nhau:
+The consequences chain:
 
 ```
 4 KB
- ├─▶ vừa MỘT giá trị Redis
- │    └─▶ một script Lua đọc/sửa/ghi trọn vẹn
- │         └─▶ Redis đơn luồng ⇒ NGUYÊN TỬ, KHÔNG CẦN KHOÁ
- │              └─▶ không deadlock, không retry, không khoá hết hạn sai lúc
- │                   └─▶ ~25.000 thao tác/giây/chuyến
- └─▶ vừa cache L2 của CPU ⇒ quét 500 chỗ trong ~microgiây
+ ├─▶ fits in ONE Redis value
+ │    └─▶ one Lua script reads, modifies and writes it whole
+ │         └─▶ Redis is single-threaded ⇒ ATOMIC, NO LOCK NEEDED
+ │              └─▶ no deadlocks, no retries, no lock expiring at the wrong moment
+ │                   └─▶ ~25,000 operations/second/trip
+ └─▶ fits in CPU L2 cache ⇒ scanning 500 berths takes microseconds
 ```
 
-Đây là lý do bài toán tranh chấp cực đoan này **giải được**. Và bạn chỉ thấy nó khi
-mô hình hoá tồn kho bằng bitmask thay vì bằng dòng SQL.
+This is why this extreme contention problem is **solvable**. And you only see it if you
+model inventory as bitmasks instead of SQL rows.
 
-> **Giới hạn cần biết:** `int32` chịu được 32 chặng. Tuyến VN tối đa ~29 — vừa đủ, không dư nhiều.
-> Tuyến dài hơn (nếu có) dùng `int64` (63 chặng) hoặc hai `int32`. Ghi rõ giới hạn này vào
-> ràng buộc dữ liệu, đừng để phát hiện lúc chạy.
+> **A limit worth knowing:** `int32` holds 32 legs. Vietnamese lines top out at ~29 — just
+> enough, with little margin. A longer line needs `int64` (63 legs) or two `int32`. Write
+> that limit into a database constraint; do not discover it at runtime.
 
 ---
 
-## 4. Bố trí dữ liệu Redis
+## 4. Redis data layout
 
 ```
-Key:   inv:{SE1-2026-02-14}:SOFT_SLEEPER_4        ← hashtag {tripId} ép cùng slot
+Key:   inv:{SE1-2026-02-14}:SOFT_SLEEPER_4        ← the {tripId} hashtag forces one slot
 Type:  Hash
-Field: berthId                                     ← "05-12" = toa 5, giường 12
+Field: berthId                                     ← "05-12" = carriage 5, bunk 12
 Value: "occ,held,level,carriage,berthNo"           ← "3,0,1,5,12"
 
-Key:   hold:{SE1-2026-02-14}:{holdId}              ← TTL 15 phút
+Key:   hold:{SE1-2026-02-14}:{holdId}              ← TTL 15 minutes
 Value: "berthId,journeyMask,bookingId"
 
 Key:   meta:{SE1-2026-02-14}
 Value: JSON { legCount, stops[], classCodes[], saleStatus }
 ```
 
-**Hashtag `{tripId}` là bắt buộc, không phải tuỳ chọn.** Redis Cluster chia slot theo hash của
-key; chỉ phần trong `{}` được tính. Không có nó, các hạng chỗ của cùng chuyến rơi vào slot khác
-nhau và **script Lua không chạy được** (Lua chỉ thao tác key cùng slot).
+**The `{tripId}` hashtag is mandatory, not optional.** Redis Cluster assigns slots by
+hashing the key, counting only what is inside `{}`. Without it, a trip's classes land in
+different slots and **the Lua script cannot run** — Lua may only touch keys in one slot.
 
-**Tách key theo hạng chỗ** (`SOFT_SLEEPER_4`, `SOFT_SEAT`, …) để script chỉ quét ứng viên
-thật sự phù hợp, thay vì cả 500 chỗ.
+**Separate keys per class** (`SOFT_SLEEPER_4`, `SOFT_SEAT`, …) so the script scans only
+genuinely eligible candidates instead of all 500 berths.
 
 ---
 
-## 5. Script Lua giữ chỗ
+## 5. The hold Lua script
 
 ```lua
 -- KEYS[1] = inv:{tripId}:{classCode}
 -- KEYS[2] = hold:{tripId}:{holdId}
--- ARGV[1] = journeyMask       (số nguyên)
+-- ARGV[1] = journeyMask       (integer)
 -- ARGV[2] = strategy          BEST_FIT | FIRST_FIT | SPECIFIC
--- ARGV[3] = requestedBerthId  (chỉ dùng khi SPECIFIC)
+-- ARGV[3] = requestedBerthId  (SPECIFIC only)
 -- ARGV[4] = holdId
 -- ARGV[5] = ttlSeconds
--- ARGV[6] = scanOffset        (ngẫu nhiên — xem §6)
+-- ARGV[6] = scanOffset        (random — see §6)
 -- ARGV[7] = bookingId
 
 local jmask    = tonumber(ARGV[1])
 local strategy = ARGV[2]
 
--- Chống lặp: holdId đã tồn tại ⇒ trả lại kết quả cũ
+-- Idempotency: this holdId already exists ⇒ replay the previous result
 if redis.call('EXISTS', KEYS[2]) == 1 then
   local prev = redis.call('GET', KEYS[2])
   return {1, prev, 'IDEMPOTENT_REPLAY'}
 end
 
-local inv = redis.call('HGETALL', KEYS[1])       -- ~4 KB, một lần đọc
+local inv = redis.call('HGETALL', KEYS[1])       -- ~4 KB, one read
 
--- Gom ứng viên
+-- Collect candidates
 local berths = {}
 for i = 1, #inv, 2 do
   local id = inv[i]
@@ -198,7 +206,7 @@ for i = 1, #inv, 2 do
   }
 end
 
--- Chọn chỗ
+-- Pick a berth
 local chosen = nil
 
 if strategy == 'SPECIFIC' then
@@ -211,7 +219,7 @@ if strategy == 'SPECIFIC' then
 
 else
   local n      = #berths
-  local offset = tonumber(ARGV[6]) % n          -- ⭐ điểm bắt đầu ngẫu nhiên
+  local offset = tonumber(ARGV[6]) % n          -- ⭐ random starting point
   local best, bestScore = nil, -1
 
   for k = 0, n - 1 do
@@ -219,11 +227,11 @@ else
 
     if bit.band(bit.bor(b.occ, b.held), jmask) == 0 then
       if strategy == 'FIRST_FIT' then
-        chosen = b                               -- ⭐ cao điểm: lấy ngay, không chấm điểm
+        chosen = b                               -- ⭐ peak load: take it, do not score
         break
       end
-      local score = (4 - b.level) * 10           -- tầng 1 > 2 > 3
-      if b.no > 4 and b.no < 30 then score = score + 3 end   -- tránh đầu/cuối toa
+      local score = (4 - b.level) * 10           -- level 1 > 2 > 3
+      if b.no > 4 and b.no < 30 then score = score + 3 end   -- avoid carriage ends
       if score > bestScore then best, bestScore = b, score end
     end
   end
@@ -234,9 +242,9 @@ if chosen == nil then
   return {0, '', 'NO_BERTH_AVAILABLE'}
 end
 
--- Đặt bit — kiểm tra lại lần cuối (phòng thủ)
+-- Set the bits — re-check defensively
 if bit.band(bit.bor(chosen.occ, chosen.held), jmask) ~= 0 then
-  return {0, '', 'RACE_DETECTED'}                -- không thể xảy ra: Lua đơn luồng
+  return {0, '', 'RACE_DETECTED'}                -- impossible: Lua is single-threaded
 end
 
 local newHeld = bit.bor(chosen.held, jmask)
@@ -251,108 +259,108 @@ redis.call('SET', KEYS[2],
 return {1, chosen.id, 'HELD'}
 ```
 
-**Bốn chi tiết đáng chú ý:**
+**Four details worth noting:**
 
-| Chi tiết | Vì sao |
+| Detail | Why |
 |---|---|
-| Kiểm `EXISTS KEYS[2]` đầu script | Idempotency. User bấm 3 lần ⇒ một chỗ, không phải ba |
-| `RACE_DETECTED` không bao giờ xảy ra | Redis Lua đơn luồng. Nhưng giữ lại để **test khẳng định giả định** — nếu nó xuất hiện, giả định nền tảng đã sai |
-| `scanOffset` ngẫu nhiên | §6 — quan trọng hơn nó trông có vẻ |
-| `FIRST_FIT` phá vòng lặp ngay | §6 |
+| `EXISTS KEYS[2]` at the top | Idempotency. Three taps produce one berth, not three |
+| `RACE_DETECTED` can never happen | Redis Lua is single-threaded. Kept so a **test can assert the assumption** — if it ever fires, a foundational assumption is wrong |
+| Random `scanOffset` | §6 — more important than it looks |
+| `FIRST_FIT` breaks immediately | §6 |
 
 ---
 
-## 6. Vì sao "chọn chỗ tốt nhất" làm hỏng hệ thống lúc cao điểm
+## 6. Why "pick the best berth" breaks the system at peak
 
-Đây là bài học phản trực giác nhất của dự án.
-
-```
-BEST_FIT — 10.000 request đồng thời
-  Mọi script đều quét từ đầu, đều chấm điểm giống nhau,
-  đều kết luận "giường 05-12 tầng 1 là tốt nhất".
-  → Request #1 lấy được.
-  → 9.999 request còn lại tính toán xong rồi phát hiện mất chỗ.
-  → Lãng phí 9.999 lần quét toàn bộ.
-```
-
-Nghịch lý: thuật toán chọn chỗ **thông minh hơn** làm hệ thống **chậm hơn**, vì nó khiến mọi
-người tranh cùng một tài nguyên.
+The most counter-intuitive lesson in the project.
 
 ```
-FIRST_FIT + scanOffset ngẫu nhiên
-  Mỗi request bắt đầu quét ở một vị trí khác nhau.
-  Request #1 bắt đầu ở chỗ 37 → lấy chỗ 37.
-  Request #2 bắt đầu ở chỗ 412 → lấy chỗ 412.
-  → Va chạm gần như bằng 0. Mỗi script dừng sau ~1 lần thử.
+BEST_FIT — 10,000 concurrent requests
+  Every script scans from the start, scores identically,
+  and concludes that "bunk 05-12, level 1" is best.
+  → Request #1 gets it.
+  → The other 9,999 finish their computation and find it gone.
+  → 9,999 full scans wasted.
 ```
 
-Hai thay đổi nhỏ — bỏ chấm điểm, bắt đầu ngẫu nhiên — đổi độ phức tạp trung bình từ
-$O(n)$ quét lãng phí sang $O(1)$ trúng ngay.
+The paradox: a **smarter** berth-selection algorithm makes the system **slower**, because it
+makes everyone contend for the same resource.
 
-**Chiến lược theo tải:**
+```
+FIRST_FIT + random scanOffset
+  Each request starts scanning somewhere different.
+  Request #1 starts at berth 37  → takes berth 37.
+  Request #2 starts at berth 412 → takes berth 412.
+  → Collisions approach zero. Each script stops after ~1 attempt.
+```
 
-| Tỉ lệ lấp đầy | Chế độ | Lý do |
+Two small changes — drop the scoring, start at random — turn average complexity from
+$O(n)$ wasted scanning into $O(1)$ immediate hits.
+
+**Strategy by load:**
+
+| Occupancy | Mode | Reason |
 |---|---|---|
-| < 60% | `SPECIFIC` (khách tự chọn trên sơ đồ) | Trải nghiệm tốt, tranh chấp thấp |
-| 60–85% | `BEST_FIT` | Vẫn còn dư chỗ để tối ưu |
-| **> 85% hoặc từ chối > 30%** | **`FIRST_FIT` + offset ngẫu nhiên** | **Sống sót quan trọng hơn tối ưu** |
+| < 60% | `SPECIFIC` (passenger picks on the map) | Good experience, low contention |
+| 60–85% | `BEST_FIT` | Enough slack left to optimise |
+| **> 85%, or rejections > 30%** | **`FIRST_FIT` + random offset** | **Surviving matters more than optimising** |
 
-Chuyển chế độ tự động dựa trên metric, và **báo cho khách biết**:
-*"Đang cao điểm — hệ thống sẽ chọn chỗ tốt nhất còn lại cho bạn."*
+Switch automatically on metrics, and **tell the passenger**:
+*"Peak demand — we will pick the best available berth for you."*
 
 ---
 
-## 7. Đếm chỗ trống — phần tinh tế
+## 7. Counting availability — the subtle part
 
-Câu hỏi tưởng đơn giản: *"Còn bao nhiêu chỗ HN→SG?"*
+A question that sounds simple: *"How many berths are left HN→SG?"*
 
-**Bộ đếm theo chặng cho kết quả SAI.** Ví dụ với sức chứa 100:
+**Per-leg counters give the WRONG answer.** With a capacity of 100:
 
 ```
-Giường #1: chỉ bị chiếm chặng L0
-Giường #2: chỉ bị chiếm chặng L4
-Các giường khác: trống hoàn toàn
+Bunk #1: occupied on leg L0 only
+Bunk #2: occupied on leg L4 only
+All other bunks: entirely free
 
-Bộ đếm theo chặng:  L0 còn 99, L4 còn 99, các chặng khác còn 100
-min(theo chặng) = 99   ← SAI
+Per-leg counters:  L0 has 99, L4 has 99, every other leg has 100
+min(per-leg) = 99   ← WRONG
 
-Thực tế cho hành trình HN→SG (cần TẤT CẢ chặng):
-  Giường #1 không dùng được (vướng L0)
-  Giường #2 không dùng được (vướng L4)
-  = 98 chỗ                 ← ĐÚNG
+Reality for HN→SG (which needs EVERY leg):
+  Bunk #1 unusable (blocked on L0)
+  Bunk #2 unusable (blocked on L4)
+  = 98 berths        ← RIGHT
 ```
 
-Bộ đếm theo chặng chỉ cho **cận trên**. Muốn đúng phải đếm thật:
+Per-leg counters only give an **upper bound**. Correctness requires a real count:
 
 $$
 \text{available}(J) = \bigl|\{\, b : (\text{occ}_b \mid \text{held}_b) \,\&\, J = 0 \,\}\bigr|
 $$
 
-Với 500 chỗ, đây là một vòng lặp Lua ~200 µs. Rẻ. Nhưng gọi 10.000 lần/giây thì không rẻ nữa.
+For 500 berths that is a ~200 µs Lua loop. Cheap. Called 10,000 times a second, not cheap.
 
-**Giải pháp ba tầng:**
+**A three-tier answer:**
 
-| Tầng | Dùng khi | Độ chính xác | Chi phí |
+| Tier | Used for | Accuracy | Cost |
 |---|---|---|---|
-| Cache Redis, TTL 3 giây | Hiển thị danh sách chuyến | Cũ tối đa 3s | ~0 |
-| Quét Lua thật | Khách mở sơ đồ chỗ của một chuyến | Chính xác lúc đó | 200 µs |
-| **Script giữ chỗ** | **Lúc bấm "Giữ chỗ"** | **Sự thật duy nhất** | 80 µs |
+| Redis cache, 3s TTL | Trip list display | Up to 3s stale | ~0 |
+| Real Lua scan | Passenger opens one trip's berth map | Accurate at that moment | 200 µs |
+| **The hold script** | **Pressing "Hold"** | **The only truth** | 80 µs |
 
-> **Nguyên tắc sản phẩm:** con số hiển thị là **gợi ý**, không phải cam kết. Giao diện phải
-> nói rõ điều đó. Mọi hệ thống bán vé đều có khoảnh khắc "chỗ vừa bị người khác lấy" —
-> khác biệt nằm ở chỗ bạn *thiết kế* cho nó hay *giả vờ* nó không tồn tại.
+> **Product rule:** the displayed number is a **suggestion**, not a promise, and the UI must
+> say so. Every ticketing system has the "someone just took it" moment — the difference is
+> whether you *design* for it or *pretend* it does not exist.
 
 ---
 
-## 8. Đặt nhóm — cả nhà nằm cùng khoang
+## 8. Group booking — a family in one compartment
 
-Yêu cầu R7. Gia đình 4 người muốn nguyên một khoang 4 giường.
+Requirement R7. A family of four wants a whole 4-berth compartment.
 
-Ràng buộc: cần $k$ chỗ **trong cùng một khoang**, tất cả đều trống cho cùng `journeyMask`.
+The constraint: $k$ berths **in the same compartment**, all free for the same `journeyMask`.
 
 ```lua
--- Quét theo khoang thay vì theo chỗ
--- Khoang = nhóm 4 hoặc 6 giường liên tiếp trong cùng toa
+-- Scan by compartment rather than by berth.
+-- A compartment is a group of 4 or 6 consecutive bunks in one carriage.
 for _, compartment in ipairs(compartments) do
   local free = {}
   for _, b in ipairs(compartment.berths) do
@@ -361,129 +369,129 @@ for _, compartment in ipairs(compartments) do
     end
   end
   if #free >= groupSize then
-    -- lấy groupSize chỗ đầu tiên, đặt bit cho tất cả trong CÙNG script
+    -- take the first groupSize berths, set bits for all of them in the SAME script
     return reserve_all(free, groupSize, jmask)
   end
 end
 ```
 
-**Thang rơi lùi khi không đủ:**
+**Fallback ladder when there is not enough room:**
 
 ```
-1. Nguyên khoang, cùng tầng          ← lý tưởng
-2. Cùng khoang, khác tầng
-3. Cùng toa, khoang liền kề
-4. Cùng toa
-5. Bất kỳ — báo rõ "không xếp được cạnh nhau, bạn có muốn tiếp tục?"
+1. Whole compartment, same level         ← ideal
+2. Same compartment, different levels
+3. Same carriage, adjacent compartments
+4. Same carriage
+5. Anywhere — say clearly "we cannot seat you together, continue?"
 ```
 
-> **Không dùng solver tối ưu ở đây.** Greedy first-fit theo thang trên là đủ và chạy trong
-> cùng script Lua. Đưa OR-Tools vào để "xếp chỗ tối ưu" là over-engineering: nó phá tính
-> nguyên tử, thêm một lời gọi mạng vào đường nóng nhất, và khách không phân biệt được
-> "tối ưu" với "đủ tốt". Đây là chỗ dễ over-engineer nhất trong cả hệ thống.
+> **Do not use an optimisation solver here.** Greedy first-fit down that ladder is enough
+> and runs inside the same Lua script. Adding OR-Tools for "optimal allocation" is
+> over-engineering: it breaks atomicity, puts a network call on the hottest path, and
+> passengers cannot tell "optimal" from "good enough". This is the easiest place in the
+> whole system to over-engineer.
 
 ---
 
-## 9. Đổi vé — thao tác nguy hiểm nhất
+## 9. Exchanges — the most dangerous operation
 
-Đổi từ chuyến A sang chuyến B: phải **nhả mask cũ và chiếm mask mới**, và nếu nửa chừng thất bại thì khách mất cả hai.
+Exchanging trip A for trip B means **releasing the old mask and taking a new one**. If it
+fails halfway, the passenger loses both.
 
-**Cùng một chuyến** (đổi giường) — một script Lua, nguyên tử tự nhiên:
+**Same trip** (changing bunks) — one Lua script, naturally atomic:
 
 ```
 old.occupied &= ~oldMask
-new.held     |= newMask        ← trong cùng script, không thể nửa vời
+new.held     |= newMask        ← same script, cannot end up half-done
 ```
 
-**Khác chuyến** — hai shard Redis khác nhau, **không thể nguyên tử**. Bắt buộc dùng saga:
+**Different trips** — two different Redis shards, **atomicity is impossible**. A saga is
+required:
 
 ```
-1. Giữ chỗ MỚI trên chuyến B          (chưa đụng vé cũ)
-   ✗ thất bại ⇒ dừng, vé cũ nguyên vẹn, khách không mất gì
-2. Ghi PostgreSQL: vé cũ EXCHANGING, vé mới PENDING   (một transaction)
-3. Xác nhận chỗ mới (held → occupied)
-4. Nhả chỗ cũ
-   ✗ thất bại ⇒ đối soát nhặt lên sau; khách ĐÃ có vé mới
+1. Hold the NEW berth on trip B          (old ticket untouched)
+   ✗ fails ⇒ stop; the old ticket is intact, the passenger loses nothing
+2. Write PostgreSQL: old ticket EXCHANGING, new ticket PENDING   (one transaction)
+3. Confirm the new berth (held → occupied)
+4. Release the old berth
+   ✗ fails ⇒ reconciliation picks it up later; the passenger ALREADY has the new ticket
 ```
 
-**Thứ tự bước 1 trước bước 4 là bắt buộc.** Nhả chỗ cũ trước rồi giữ chỗ mới thất bại
-⇒ khách mất cả hai, và chỗ cũ có thể đã bị người khác lấy mất trong tích tắc đó.
+**Step 1 before step 4 is mandatory.** Releasing the old berth first and then failing to
+hold the new one leaves the passenger with nothing — and the old berth may be gone within
+milliseconds.
 
-Quy tắc chung: **luôn chiếm cái mới trước khi nhả cái cũ.** Rủi ro tệ nhất là chiếm hai chỗ
-trong vài giây — chấp nhận được. Rủi ro của thứ tự ngược lại là khách không còn chỗ nào.
+The general rule: **always take the new one before releasing the old.** The worst case is
+holding two berths for a few seconds, which is acceptable. The worst case of the reverse
+order is a passenger with no berth at all.
 
 ---
 
-## 10. Bất biến sinh tử: chỉ số ga bị đóng băng
+## 10. The critical invariant: station indexes are frozen
 
 ```
-journeyMask được tính từ CHỈ SỐ ga trong danh sách dừng.
-Chèn hoặc bỏ một ga ⇒ MỌI mask đã bán trở nên vô nghĩa.
+journeyMask is computed from a station's INDEX in the stop list.
+Insert or remove a stop ⇒ EVERY sold mask becomes meaningless.
 ```
 
-Ví dụ: chuyến đang bán, điều độ thêm ga Tam Kỳ vào giữa Đà Nẵng(3) và Nha Trang(4).
-Mọi ga sau đó dịch chỉ số +1. Vé HN→SG có mask `0b11111` giờ trỏ sai chặng.
-**Toàn bộ tồn kho hỏng âm thầm** — không có lỗi nào được ném ra.
+Example: a trip is on sale and operations insert Tam Ky between Da Nang(3) and Nha Trang(4).
+Every later station shifts by +1. A HN→SG ticket with mask `0b11111` now points at the wrong
+legs. **The entire inventory is silently corrupt** — no error is ever thrown.
 
-**Quy tắc bắt buộc:**
+**The rule:**
 
-| Trạng thái chuyến | Được sửa danh sách ga? |
+| Trip status | May the stop list change? |
 |---|---|
-| `SCHEDULED` (chưa mở bán) | ✅ Tự do |
-| `SELLING` · `CLOSED` · `DEPARTED` | ❌ **Cấm tuyệt đối** |
+| `SCHEDULED` (not yet on sale) | ✅ Freely |
+| `SELLING` · `CLOSED` · `DEPARTED` | ❌ **Absolutely not** |
 
-Đổi lịch sau khi mở bán ⇒ **tạo chuyến mới** + di cư vé + thông báo khách. Đau nhưng an toàn.
+Rescheduling after the sale opens means **creating a new trip**, migrating tickets, and
+notifying passengers. Painful, but safe.
 
-Thực thi ở tầng dữ liệu:
-
-```sql
-ALTER TABLE trip_stop ADD CONSTRAINT chk_stops_frozen CHECK (
-    (SELECT status FROM trip t WHERE t.trip_id = trip_stop.trip_id) = 'SCHEDULED'
-);
--- Thực tế dùng trigger BEFORE INSERT/UPDATE/DELETE vì CHECK không query được bảng khác
-```
+Enforced at the data layer with a `BEFORE INSERT/UPDATE/DELETE` trigger on `trip_stop` —
+a `CHECK` constraint cannot query another table.
 
 ---
 
-## 11. Sinh dữ liệu — 7 giờ, không cần curate
+## 11. Generating the data — 7 hours, nothing curated
 
 ```
-20 ga chính tuyến Bắc–Nam        →  gõ tay, 15 phút
-   HN · Phủ Lý · Nam Định · Ninh Bình · Thanh Hoá · Vinh · Đồng Hới
-   Đông Hà · Huế · Đà Nẵng · Tam Kỳ · Quảng Ngãi · Diêu Trì · Tuy Hoà
-   Nha Trang · Tháp Chàm · Biên Hoà · Sài Gòn
+20 stations on the North–South line  →  typed by hand, 15 minutes
+   HN · Phu Ly · Nam Dinh · Ninh Binh · Thanh Hoa · Vinh · Dong Hoi
+   Dong Ha · Hue · Da Nang · Tam Ky · Quang Ngai · Dieu Tri · Tuy Hoa
+   Nha Trang · Thap Cham · Bien Hoa · Sai Gon
 
-Thành phần đoàn tàu             →  vòng lặp
-   Toa 1–2:  ghế mềm điều hoà     64 ghế
-   Toa 3–6:  giường nằm khoang 6  42 giường (7 khoang × 6, tầng 1/2/3)
-   Toa 7–10: giường nằm khoang 4  28 giường (7 khoang × 4, tầng 1/2)
-   Toa 11:   toa ăn · Toa 12: hành lý
-   → 128 + 168 + 112 = 408 chỗ/chuyến
+Train composition                    →  a loop
+   Carriages 1–2:  air-conditioned soft seats   64 seats
+   Carriages 3–6:  6-berth compartments         42 bunks (7 × 6, levels 1/2/3)
+   Carriages 7–10: 4-berth compartments         28 bunks (7 × 4, levels 1/2)
+   Carriage 11: dining · Carriage 12: baggage
+   → 128 + 168 + 112 = 408 berths per trip
 
-Chuyến                          →  generator
-   5 mác tàu (SE1/3/5/7, TN1) × 2 chiều × 20 ngày Tết = 200 chuyến
+Trips                                →  generator
+   5 services (SE1/3/5/7, TN1) × 2 directions × 20 Tết days = 200 trips
 
-Giá vé                          →  công thức
-   base × hệ_số_quãng_đường × hệ_số_hạng_chỗ × hệ_số_tầng × hệ_số_cao_điểm
+Fares                                →  formula
+   base × distance_factor × class_factor × level_factor × peak_factor
 ```
 
-**Bất đối xứng có thật đáng mô phỏng:** trước Tết, chiều **Nam → Bắc** cháy vé (người làm ăn ở
-Sài Gòn về quê); sau Tết thì ngược lại. Load test nên phản ánh điều này thay vì rải đều —
-nếu không bạn sẽ tối ưu cho một hình dạng tải không tồn tại.
+**A real asymmetry worth simulating:** before Tết, **South → North** sells out (workers in
+Saigon going home); after Tết it reverses. The load test should reflect that rather than
+spreading evenly — otherwise you optimise for a load shape that does not exist.
 
 ---
 
-## 12. Cách chứng minh bạn làm đúng
+## 12. How to prove you got it right
 
-Điểm mạnh lớn nhất của domain này: **tính đúng đắn kiểm chứng được bằng máy.**
+The greatest strength of this domain: **correctness is machine-checkable.**
 
 ```bash
-make loadtest   # k6: 10.000 VU tranh 408 chỗ trên SE1-2026-02-14
-make verify
+# k6: 10,000 VUs contending for 408 berths on SE1-2026-02-14, then:
+tools/verify
 ```
 
 ```sql
--- ⛔ BẤT BIẾN 1: không chồng chặng trên cùng một chỗ
+-- ⛔ INVARIANT 1: no overlapping legs on one berth
 SELECT t1.berth_id, t1.ticket_id, t2.ticket_id
 FROM ticket t1 JOIN ticket t2
   ON  t1.trip_id  = t2.trip_id
@@ -491,34 +499,34 @@ FROM ticket t1 JOIN ticket t2
   AND t1.ticket_id < t2.ticket_id
   AND (t1.journey_mask & t2.journey_mask) <> 0
 WHERE t1.status = 'ISSUED' AND t2.status = 'ISSUED';
--- PHẢI trả về 0 dòng
+-- MUST return 0 rows
 
--- ⛔ BẤT BIẾN 2: không chặng nào vượt sức chứa
+-- ⛔ INVARIANT 2: no leg exceeds capacity
 SELECT leg_idx, count(*) AS sold, capacity
 FROM ticket_leg JOIN trip_capacity USING (trip_id, leg_idx)
 GROUP BY leg_idx, capacity
 HAVING count(*) > capacity;
--- PHẢI trả về 0 dòng
+-- MUST return 0 rows
 
--- ⛔ BẤT BIẾN 3: Redis khớp PostgreSQL
--- (reconciliation chạy và báo 0 sai lệch)
+-- ⛔ INVARIANT 3: Redis matches PostgreSQL
+-- (reconciliation runs and reports zero drift)
 
--- ⛔ BẤT BIẾN 4: tiền khớp vé
+-- ⛔ INVARIANT 4: money matches tickets
 SELECT b.booking_id FROM booking b
 WHERE b.status = 'CONFIRMED'
   AND b.total_vnd <> (SELECT COALESCE(sum(fare_vnd),0) FROM ticket
                       WHERE booking_id = b.booking_id AND status <> 'REFUNDED');
--- PHẢI trả về 0 dòng
+-- MUST return 0 rows
 ```
 
-Bốn truy vấn này chạy sau **mỗi** lần load test, trong CI. Đỏ một cái là build fail.
+These four run after **every** load test, in CI. One red query fails the build.
 
-> **Tính đúng đắn ở đây là nhị phân, không phải ý kiến.** "Có bán thừa vé không" trả lời được
-> trong 30 giây, tự động, mỗi lần commit — không cần người dùng thật, không cần chờ phản hồi,
-> không cần tranh luận. Đó là lý do bạn dám thay đổi kiến trúc tồn kho bốn lần ở
-> [04 §12](04-contention-strategies.md) mà không sợ: mỗi lần đổi, bốn truy vấn này nói ngay
-> bạn còn đúng hay đã sai.
+> **Correctness here is binary, not a matter of opinion.** "Did we oversell?" is answered in
+> 30 seconds, automatically, on every commit — no real users, no waiting for feedback, no
+> argument. That is why you can change the inventory architecture four times in
+> [04 §12](04-contention-strategies.md) without fear: after each change, these four queries
+> tell you immediately whether you are still right.
 
 ---
 
-**Tiếp theo:** [04 — Contention Strategies](04-contention-strategies.md)
+**Next:** [04 — Contention Strategies](04-contention-strategies.md)

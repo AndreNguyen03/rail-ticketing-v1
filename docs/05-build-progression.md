@@ -1,60 +1,62 @@
 # 05 — Build Progression
 
-> Kiến trúc ở [02](02-architecture.md) là **đích đến**, không phải điểm xuất phát.
+> The architecture in [02](02-architecture.md) is the **destination**, not the starting point.
 >
-> Nhưng "điểm xuất phát" ở đây **vẫn là microservices** — nhiều service, deploy riêng,
-> database riêng, gọi nhau qua mạng. Thứ bị hoãn là **kỹ thuật bên trong và giữa** chúng,
-> không phải bản thân topology.
+> But the starting point is **still microservices** — several services, deployed separately,
+> with separate databases, calling each other over the network. What is deferred is the
+> **technique inside and between** them, not the topology itself.
 
 ---
 
-## 1. Nguyên tắc chi phối
+## 1. The governing principle
 
-> ### Topology đầy đủ ngay từ đầu. Kỹ thuật thêm dần theo số đo được.
+> ### Full topology from the first commit. Technique added against measurements.
 
-Hai vế, đừng lẫn:
+Two halves, do not confuse them:
 
-| Có ngay từ commit đầu | Hoãn tới khi đo được nhu cầu |
+| Present from commit one | Deferred until measured |
 |---|---|
-| Nhiều service, deploy độc lập | Redis, cache |
-| Database riêng mỗi service | Kafka, event, saga |
-| Gọi nhau qua HTTP thật | Circuit breaker, retry, bulkhead |
-| API gateway | Phòng chờ ảo |
-| Bitmask tồn kho | Đối soát |
-| Idempotency key | Service mesh, K8s |
+| Several services, deployed independently | Redis, caching |
+| A database per service | Kafka, events, sagas |
+| Real HTTP calls between them | Circuit breakers, retry, bulkheads |
+| API gateway | Virtual waiting room |
+| Inventory bitmask | Reconciliation |
+| Idempotency keys | Service mesh, Kubernetes |
 
-Lý do chia như vậy: **mục tiêu học là hệ phân tán.** Nếu bắt đầu bằng monolith rồi tách sau,
-bạn dành 6 tuần đầu học Spring Boot — thứ bạn đã biết. Bắt đầu bằng nhiều service, bạn
-va ngay vào lời gọi mạng thất bại, không có transaction xuyên service, và log nằm ở 3 chỗ.
-**Đó mới là thứ đáng học.**
+The reason for that split: **the goal is to learn distributed systems.** Start with a
+monolith and you spend six weeks learning Spring Boot — which you already know. Start with
+several services and you hit failing network calls, no transaction across services, and
+logs in three places on day one. **That is the part worth learning.**
 
-Nhưng đừng nhét Redis, Kafka, mesh vào cùng lúc — khi đó bạn không biết vấn đề nào do đâu.
+But do not add Redis, Kafka and a mesh at once, or you will not know which problem came
+from where.
 
-### Thứ không đổi qua mọi giai đoạn: API công khai
+### What never changes: the public API
 
 ```
 Client  ──────────────────────────────────────────────▶  gateway
                                                             │
-   GĐ 0:  3 service · REST đồng bộ · PostgreSQL             │
-   GĐ 3:  3 service · + timeout, retry, idempotency         │  hợp đồng
-   GĐ 4:  3 service · + Redis trong inventory               │  KHÔNG ĐỔI
-   GĐ 5:  5 service · + Kafka, outbox, saga                 │
-   GĐ 7:  12 service · + phòng chờ, K8s                     │
+   Stage 0:  3 services · synchronous REST · PostgreSQL     │
+   Stage 3:  3 services · + timeouts, retry, idempotency    │  CONTRACT
+   Stage 4:  3 services · + Redis inside inventory          │  UNCHANGED
+   Stage 5:  5 services · + Kafka, outbox, saga             │
+   Stage 7:  12 services · + waiting room, Kubernetes       │
 ```
 
-Client không biết và không cần biết bên trong đổi gì. Đó là lý do **thiết kế API trước**.
+The client neither knows nor needs to know what changed inside. That is why the **API is
+designed first**.
 
 ---
 
-## 2. Giai đoạn 0 — Bộ khung microservices, CRUD thuần
+## 2. Stage 0 — Microservices skeleton, plain CRUD
 
-**Mục tiêu: đặt được một vé, đi qua 3 service thật, không có kỹ thuật gì cả.**
+**Goal: book one ticket through three real services, with no technique at all.**
 
-### Ba service + gateway
+### Three services plus a gateway
 
 ```
                     ┌──────────────┐
-   Client ─────────▶│ api-gateway  │   định tuyến, không gì khác
+   Client ─────────▶│ api-gateway  │   routing, nothing else
                     └──────┬───────┘
            ┌───────────────┼───────────────┐
            ▼               ▼               ▼
@@ -63,337 +65,348 @@ Client không biết và không cần biết bên trong đổi gì. Đó là lý
   │   service   │  │   service    │◀─│   service   │
   └──────┬──────┘  └──────┬───────┘  └──────┬──────┘
          │                │                 │
-     scheduledb      inventorydb        bookingdb      ← 3 database RIÊNG
+     scheduledb      inventorydb        bookingdb   ← THREE SEPARATE DATABASES
 ```
 
-| Service | Sở hữu | Endpoint |
+| Service | Owns | Endpoints |
 |---|---|---|
-| `schedule-service` | Ga, tàu, chuyến, toa, chỗ, giá | `GET /trips`, `GET /trips/{id}` |
-| `inventory-service` | Tồn kho theo chặng, hold | `GET /availability`, `POST /holds`, `DELETE /holds/{id}` |
-| `booking-service` | Đơn, vé, thanh toán (mock) | `POST /bookings`, `POST /bookings/{id}/confirm`, `GET /bookings/{id}` |
-| `api-gateway` | Định tuyến | — |
+| `schedule-service` | Stations, trains, trips, carriages, berths, prices | `GET /trips`, `GET /trips/{id}` |
+| `inventory-service` | Segment inventory, holds | `GET /availability`, `POST /holds`, `DELETE /holds/{id}` |
+| `booking-service` | Orders, tickets, payment (mock) | `POST /bookings`, `POST /bookings/{id}/confirm`, `GET /bookings/{id}` |
+| `api-gateway` | Routing | — |
 
-Tại sao đúng ba cái này: chúng là **ba plane khác nhau** ở [02 §3](02-architecture.md) — Catalog
-(đọc nhiều, dữ liệu lạnh), Contention (tranh chấp), và điều phối. Ranh giới này được quyết
-định bởi hình dạng tải, và hình dạng tải **không đổi** — nên đây là ba ranh giới ít rủi ro nhất.
+Why exactly these three: they are **three different planes** from
+[02 §3](02-architecture.md) — catalog (read-heavy, cold), contention, and orchestration.
+Those boundaries follow load shape, and load shape does not change — so they are the three
+lowest-risk boundaries available.
 
-### Bề mặt API
+### API surface
 
-| Method | Path | Service | Việc |
-|---|---|---|---|
-| `GET` | `/api/v1/trips?from=HN&to=SG&date=2026-02-14` | schedule | Tìm chuyến |
-| `GET` | `/api/v1/trips/{tripId}` | schedule | Chi tiết + sơ đồ toa |
-| `GET` | `/api/v1/trips/{tripId}/availability?from=0&to=17` | inventory | Chỗ trống **cho hành trình này** |
-| `POST` | `/api/v1/holds` | inventory | Giữ chỗ, TTL 15 phút |
-| `DELETE` | `/api/v1/holds/{holdId}` | inventory | Nhả chỗ |
-| `POST` | `/api/v1/bookings` | booking | Tạo đơn từ hold |
-| `POST` | `/api/v1/bookings/{id}/confirm` | booking | Xác nhận, thanh toán mock |
-| `GET` | `/api/v1/bookings/{id}` | booking | Xem đơn |
+| Method | Path | Service |
+|---|---|---|
+| `GET` | `/api/v1/trips?from=HN&to=SG&date=2026-02-14` | schedule |
+| `GET` | `/api/v1/trips/{tripId}` | schedule |
+| `GET` | `/api/v1/trips/{tripId}/availability?from=0&to=17` | inventory |
+| `POST` | `/api/v1/holds` | inventory |
+| `DELETE` | `/api/v1/holds/{holdId}` | inventory |
+| `POST` | `/api/v1/bookings` | booking |
+| `POST` | `/api/v1/bookings/{id}/confirm` | booking |
+| `GET` | `/api/v1/bookings/{id}` | booking |
 
-Tám endpoint, ba service. Hết.
+Eight endpoints, three services. The machine-readable version is
+[contracts/openapi.yaml](../contracts/openapi.yaml).
 
-### Cố tình KHÔNG có
-
-```
-✗ Redis                    ✗ Circuit breaker        ✗ Phòng chờ ảo
-✗ Kafka / event            ✗ Retry / backoff        ✗ Quota chống đầu cơ
-✗ Saga framework           ✗ Service discovery      ✗ Keycloak
-✗ Cache bất kỳ loại nào    ✗ Kubernetes             ✗ Distributed tracing
-```
-
-Gọi service khác bằng `RestClient` với URL từ biến môi trường. `docker-compose` lo DNS.
-Thanh toán là một `if (random() < 0.9) success else fail` trong `booking-service`.
-Xác thực là header `X-Identity` không kiểm gì.
-
-### Điểm tinh tế: không có transaction xuyên service — xử lý thô thế nào
-
-Đây là vấn đề bạn va phải **ngay ngày đầu** khi chọn microservices trước, và là lý do
-chính đáng để chọn nó.
+### Deliberately absent
 
 ```
-booking-service nhận POST /bookings
-  1. gọi inventory  POST /holds          → OK, có holdId
-  2. ghi bookingdb  INSERT booking       → LỖI (vi phạm ràng buộc, DB rớt, pod chết…)
-  3. gọi inventory  DELETE /holds/{id}   → bồi hoàn thô
+✗ Redis                ✗ Circuit breakers      ✗ Virtual waiting room
+✗ Kafka / events       ✗ Retry / backoff       ✗ Anti-scalping quotas
+✗ Saga framework       ✗ Service discovery     ✗ Keycloak
+✗ Caching of any kind  ✗ Kubernetes            ✗ Distributed tracing
 ```
 
-Lỗ hổng rõ ràng: **pod chết giữa bước 2 và 3** ⇒ hold mồ côi, chỗ bị khoá mà không ai dùng.
+Call other services with a bare `RestClient` and a URL from the environment; Compose
+handles DNS. Payment is `if (random() < 0.9) success else fail` inside `booking-service`.
+Authentication is an `X-Identity` header that nothing verifies.
 
-**Và ở giai đoạn 0 điều đó chấp nhận được — vì hold có TTL.**
+### The subtle part: no cross-service transaction
 
-> **TTL của hold chính là thứ cho phép bồi hoàn ngây thơ hoạt động ở giai đoạn 0.**
-> Hold mồ côi tự chết sau 15 phút. Bạn mất tối đa 15 phút × vài chỗ. Không cần saga,
-> không cần outbox, không cần Kafka.
+This is what you hit **on day one** by choosing microservices first, and the main reason
+to choose it.
+
+```
+booking-service receives POST /bookings
+  1. call inventory  POST /holds          → OK, holdId returned
+  2. write bookingdb INSERT booking       → FAILS (constraint, DB down, pod killed…)
+  3. call inventory  DELETE /holds/{id}   → naive compensation
+```
+
+The obvious hole: **the pod dies between step 2 and step 3** ⇒ an orphaned hold, berths
+locked for nobody.
+
+**And at stage 0 that is acceptable — because holds have a TTL.**
+
+> **The hold TTL is what makes naive compensation work at stage 0.**
+> An orphaned hold dies on its own after 15 minutes. You lose at most 15 minutes on a few
+> berths. No saga, no outbox, no Kafka.
 >
-> Đây là ví dụ đẹp của việc **thiết kế nghiệp vụ che cho hạ tầng chưa có**. Ghi nhận nó,
-> vì ở giai đoạn 5 bạn sẽ thay bằng saga thật và hiểu chính xác saga mua cho bạn cái gì:
-> giảm cửa sổ mất mát từ 15 phút xuống vài giây, và biến "mất im lặng" thành "có bản ghi".
+> This is a clean example of **business design covering for absent infrastructure**. Note
+> it, because at stage 5 you replace it with a real saga and will understand exactly what
+> the saga buys: the loss window shrinks from 15 minutes to seconds, and "silent loss"
+> becomes "a durable record".
 
-### Quyết định kỹ thuật trong `inventory-service`
+### Technical decisions inside `inventory-service`
 
-| Hạng mục | Chọn | Vì sao |
+| Concern | Choice | Why |
 |---|---|---|
-| Tồn kho | `SELECT FOR UPDATE SKIP LOCKED` | Đúng tuyệt đối, PostgreSQL giữ bất biến hộ |
-| Chống chồng chặng | `EXCLUDE USING gist` | Không thể lách, kể cả code có bug |
-| Hết hạn hold | `@Scheduled` quét mỗi 30 giây | Đủ. Hẹn giờ phân tán là bài toán sau |
-| Chọn chỗ | Quét đơn giản, lấy chỗ đầu tiên trống | Thuật toán ưu tiên là chuyện của [03 §6](03-segment-inventory-engine.md) |
+| Inventory | `SELECT FOR UPDATE SKIP LOCKED` | Absolutely correct; PostgreSQL holds the invariant for you |
+| Overlap prevention | `EXCLUDE USING gist` | Cannot be bypassed, even by buggy code |
+| Hold expiry | `@Scheduled` sweep every 30s | Enough. Distributed timers are a later problem |
+| Berth selection | Simple scan, first free berth | Priority algorithms are [03 §6](03-segment-inventory-engine.md)'s business |
 
-### Bốn thứ phải làm đúng ngay — rẻ lúc này, rất đắt lúc sau
+### Four things to get right immediately — cheap now, very expensive later
 
-| Việc | Vì sao không hoãn được |
+| Item | Why it cannot wait |
 |---|---|
-| **Bitmask cho chặng** | Đổi mô hình tồn kho sau = viết lại `inventory-service` ([03 §2](03-segment-inventory-engine.md)) |
-| **Idempotency key** trên mọi POST ghi | Nhét vào sau = sửa mọi client và mọi handler. Và bạn **sẽ** cần nó ở GĐ 3 khi thêm retry |
-| **Quy ước API** — đơn vị trong tên trường, ngày lịch vs thời điểm, lỗi RFC 9457 | Đổi contract sau khi có client rất đau |
-| **Database riêng thật sự** — mỗi service một DB, một user, không query chéo | Đây là ranh giới microservices **thật**. Chung DB = monolith đội lốt |
+| **Leg bitmask** | Changing the inventory model later means rewriting `inventory-service` ([03 §2](03-segment-inventory-engine.md)) |
+| **Idempotency key** on every write POST | Retrofitting means touching every client and every handler. And you **will** need it at stage 3 when retry arrives |
+| **API conventions** — units in field names, calendar date vs instant, RFC 9457 errors | Changing the contract once clients exist is painful |
+| **Genuinely separate databases** — one DB, one user, no cross queries | This is the **real** microservices boundary. A shared database is a monolith in disguise |
 
-> Mục cuối là thứ hay bị gian lận nhất. "Tạm thời chung một Postgres cho tiện" rồi một
-> ngày bạn `JOIN` từ `booking` sang `inventory` và mọi tính độc lập biến mất.
-> Dùng **user riêng, quyền riêng** — để việc gian lận đó bị database từ chối.
+> The last one is the most commonly cheated. "One Postgres for now, it's simpler" and one
+> day you `JOIN` from `booking` into `inventory` and all independence is gone.
+> Use **separate users with separate grants** — so that the database refuses the cheat.
 
-### Xong khi nào
+### Done when
 
-- [ ] Đặt được vé HN→SG qua `curl`, đi qua đủ 3 service
-- [ ] Đặt trùng ghế trùng chặng bị từ chối
-- [ ] Hold hết hạn thì chỗ quay lại kho
-- [ ] Tắt `inventory-service` ⇒ `booking` trả lỗi rõ ràng, **không treo vô hạn**
-- [ ] Ba database riêng, thử `JOIN` chéo bị từ chối quyền
-- [ ] `docker compose up` dựng 4 container + 3 DB
+- [ ] Booking HN→SG works via `curl`, through all three services
+- [ ] A double booking of the same berth on overlapping legs is rejected
+- [ ] An expired hold returns its berths to inventory
+- [ ] Stopping `inventory-service` makes `booking` return a clear error and **not hang forever**
+- [ ] Three separate databases; a cross-database `JOIN` is refused on privileges
+- [ ] `docker compose up` brings up four containers and three databases
 
-**Thời lượng: ~3 tuần.** Lâu hơn monolith một tuần — đó là học phí cho việc vào đúng topology.
+**Duration: ~3 weeks.** One week more than a monolith — that is the tuition for starting
+in the right topology.
 
 ---
 
-## 3. Đánh đổi của việc chọn microservices trước
+## 3. The trade-off of choosing microservices first
 
-Nói thẳng cả hai mặt:
+Both sides, plainly:
 
-| | Microservices trước ⭐ | Monolith rồi tách |
+| | Microservices first ⭐ | Monolith, split later |
 |---|---|---|
-| Tới vé đầu tiên | ~3 tuần | ~2 tuần |
-| Va vào bài toán phân tán | **Ngày đầu** | Tuần thứ 8 |
-| Ranh giới service | Cố định sớm — **sai thì sửa đắt** | Sửa rẻ (đổi package) |
-| Debug | Khó từ đầu, 3 log stream | Dễ lúc đầu |
-| Không có transaction chung | **Đối mặt ngay** — và TTL che cho | `@Transactional` lo hết |
-| Học được gì trong 8 tuần đầu | Hệ phân tán | Spring Boot (thứ bạn đã biết) |
-| Rủi ro lớn nhất | Chia sai ranh giới | Không bao giờ tách nổi |
+| Time to first ticket | ~3 weeks | ~2 weeks |
+| First distributed problem | **Day one** | Week eight |
+| Service boundaries | Fixed early — **expensive if wrong** | Cheap to change (move a package) |
+| Debugging | Hard from the start, 3 log streams | Easy at first |
+| No shared transaction | **Faced immediately** — TTL covers it | `@Transactional` hides it |
+| What the first 8 weeks teach | Distributed systems | Spring Boot (which you know) |
+| Biggest risk | Wrong boundaries | Never actually splitting |
 
-**Giảm thiểu rủi ro "chia sai ranh giới":** ba service ở GĐ 0 được chọn theo **hình dạng tải**
-([02 §3](02-architecture.md)), không theo thực thể. Hình dạng tải là thứ ổn định nhất trong
-hệ này — catalog sẽ luôn đọc-nhiều-ghi-ít, tồn kho sẽ luôn là điểm tranh chấp. Ba ranh giới
-đó gần như chắc chắn đúng.
+**Mitigating "wrong boundaries":** the three stage-0 services are chosen by **load shape**
+([02 §3](02-architecture.md)), not by entity. Load shape is the most stable thing in this
+system — catalog will always be read-heavy, inventory will always be the contention point.
+Those three boundaries are almost certainly right.
 
-Những ranh giới **có thể** sai và bạn sẽ sửa sau: `fare` nên tách khỏi `schedule` không?
-`quota` nên nằm trong `booking` không? Cứ để chúng trong service lớn hơn ở GĐ 0, tách khi đo được.
+Boundaries that **might** be wrong and that you will fix later: should `fare` split from
+`schedule`? Should `quota` live inside `booking`? Leave them in the larger service at
+stage 0 and split when you can measure the need.
 
 ---
 
-## 4. Giai đoạn 1 — Lưới an toàn, trước khi tối ưu bất cứ thứ gì
+## 4. Stage 1 — Safety net, before optimising anything
 
-**Mục tiêu: có tín hiệu đỏ/xanh tự động.**
+**Goal: an automatic red/green signal.**
 
-| Thành phần | Nội dung |
+| Component | Content |
 |---|---|
-| **4 truy vấn bất biến** | [03 §12](03-segment-inventory-engine.md) — chạy trên `inventorydb` + `bookingdb` |
-| **`make verify`** | Exit code khác 0 nếu truy vấn nào trả về dòng |
-| **Load test k6** | 1.000 VU tranh 408 chỗ trên một chuyến |
-| **CI** | Load test + verify chạy mỗi PR |
+| **Four invariant queries** | [03 §12](03-segment-inventory-engine.md) — run against `inventorydb` and `bookingdb` |
+| **`tools/verify`** | Non-zero exit if any query returns a row |
+| **k6 load test** | 1,000 VUs contending for 408 berths on one trip |
+| **CI** | Load test and verify on every PR |
 
-Bạn sắp thay đổi `inventory-service` **bốn lần**. Không có lưới này, mỗi lần đổi là một
-lần cầu nguyện.
+You are about to change `inventory-service` **four times**. Without this net, every change
+is a prayer.
 
-Lưu ý riêng cho kiến trúc nhiều service: truy vấn bất biến giờ phải chạy **xuyên hai database**
-(`booking` giữ vé, `inventory` giữ mask). Không `JOIN` được ⇒ script verify đọc cả hai rồi
-so trong bộ nhớ. **Đó chính là bài học đầu tiên về nhất quán phân tán**, và bạn gặp nó ở tuần thứ 4.
+One note specific to a multi-service architecture: the invariant queries now span **two
+databases** (`booking` holds tickets, `inventory` holds masks). You cannot `JOIN`, so the
+verify script reads both and compares in memory. **That is your first lesson in distributed
+consistency**, and it arrives in week four.
 
-- [ ] `make verify` bắt được lỗi khi bạn **cố ý** phá — bỏ `FOR UPDATE` đi và xem nó đỏ
-- [ ] CI chặn merge khi verify đỏ
+- [ ] Verify catches a **deliberate** break — remove `FOR UPDATE` and watch it go red
+- [ ] CI blocks merge when verify is red
 
-**Thời lượng: ~5 ngày.**
+**Duration: ~5 days.**
 
 ---
 
-## 5. Giai đoạn 2 — Đo, đừng đoán
+## 5. Stage 2 — Measure, do not guess
 
-**Mục tiêu: con số gốc, và biết nút thắt nằm ở đâu.**
+**Goal: baseline numbers, and knowing where the bottleneck is.**
 
-| # | Làm gì | Sẽ thấy gì |
+| # | Do | You will see |
 |---|---|---|
-| **A** | Tăng VU: 100 → 500 → 2.000 → 10.000 | Throughput chạm trần (dự kiến 200–500/giây/chuyến) |
-| **B** | **Tăng instance `inventory-service`: 1 → 2 → 4 → 8 → 16** | ⭐ **Đường cong USL** — đỉnh rồi **tụt** |
-| **C** | 1 chuyến vs 200 chuyến, cùng tổng RPS | Tranh chấp biến mất khi trải ra |
-| **D** | Đo **thời gian mạng** giữa các service | Bao nhiêu % độ trễ là hop mạng, không phải công việc thật |
+| **A** | Raise VUs: 100 → 500 → 2,000 → 10,000 | Throughput hits a ceiling (expect 200–500/s per trip) |
+| **B** | **Raise `inventory-service` instances: 1 → 2 → 4 → 8 → 16** | ⭐ **The USL curve** — a peak, then a **decline** |
+| **C** | 1 trip vs 200 trips at the same total RPS | Contention disappears when spread out |
+| **D** | Measure **network time** between services | What share of latency is a hop, not real work |
 
-Thí nghiệm D chỉ có khi bạn chọn microservices trước — và nó dạy một thứ quan trọng:
-**mỗi hop mạng là 1–3 ms bạn không bao giờ lấy lại được.** Đó là cái giá của tính độc lập,
-và biết con số cụ thể giúp bạn không tách service bừa bãi về sau.
+Experiment D only exists because you chose microservices first, and it teaches something
+important: **each network hop is 1–3 ms you never get back.** That is the price of
+independence, and knowing the number stops you splitting services carelessly later.
 
 ```
 baseline.md
-├── Throughput đỉnh:        ??? hold/giây/chuyến
-├── Số instance tối ưu:     ???  (thấp đến bất ngờ)
-├── p50 / p95 / p99:        ???
-├── Thời gian đi đâu:       ???% chờ khoá · ???% query · ???% hop mạng
-└── Nút thắt:               ???
+├── Peak throughput:      ??? holds/s/trip
+├── Optimal instances:    ???  (surprisingly low)
+├── p50 / p95 / p99:      ???
+├── Where time goes:      ???% lock wait · ???% query · ???% network hop
+└── Bottleneck:           ???
 ```
 
-**File này là giấy phép cho các giai đoạn sau.**
+**This file is the licence for every later stage.**
 
-**Thời lượng: ~1 tuần** — phần lớn là chờ test chạy.
+**Duration: ~1 week** — mostly waiting for tests to run.
 
 ---
 
-## 6. Giai đoạn 3 — Làm cứng các lời gọi đã có
+## 6. Stage 3 — Harden the calls you already have
 
-**Điều kiện vào: bạn đã thấy chúng hỏng thế nào ở GĐ 2.**
+**Entry condition: you have seen them fail at stage 2.**
 
-Ở GĐ 0 bạn gọi service khác bằng `RestClient` trần. Giờ vá các chế độ hỏng **đã quan sát được**:
+At stage 0 you called other services with a bare `RestClient`. Now patch the **observed**
+failure modes:
 
-| Thêm | Vá vấn đề gì |
+| Add | Fixes |
 |---|---|
-| **Timeout giảm dần vào trong** | gateway 8s > booking 5s > inventory 800ms > DB 200ms |
-| **Retry + jitter, chỉ cho thao tác idempotent** | Lỗi mạng thoáng qua. **Cần idempotency key từ GĐ 0** |
-| **Circuit breaker** | `inventory` chậm không được kéo sập `booking` |
-| **Bulkhead** | Pool riêng cho lời gọi ra ngoài |
-| **Correlation ID xuyên 3 service** | Giờ mới thật sự cần — log nằm ở 3 chỗ |
+| **Timeouts decreasing inward** | gateway 8s > booking 5s > inventory 800ms > DB 200ms |
+| **Retry with jitter, idempotent operations only** | Transient network errors. **Requires the idempotency key from stage 0** |
+| **Circuit breaker** | A slow `inventory` must not drag `booking` down |
+| **Bulkhead** | A separate pool for outbound calls |
+| **Correlation ID across three services** | Now genuinely needed — logs live in three places |
 
-Đây là giai đoạn biến "3 service gọi nhau" thành "hệ phân tán chịu lỗi". Nó ngắn nhưng
-đổi hẳn chất lượng.
+This turns "three services calling each other" into "a fault-tolerant distributed system".
+It is short but changes the character of the thing.
 
-> Chú ý thứ tự: **retry đến sau idempotency key**. Retry một thao tác không idempotent
-> là cách tạo ra vé trùng. Đó là lý do idempotency key nằm trong danh sách "làm đúng ngay" ở GĐ 0.
+> Note the order: **retry comes after idempotency keys**. Retrying a non-idempotent
+> operation is how you create duplicate tickets. That is why the key is on the stage-0
+> "get right immediately" list.
 
-- [ ] Tắt `inventory-service` ⇒ `booking` mở circuit sau vài lần lỗi, trả lỗi nhanh
-- [ ] Thêm 500ms độ trễ nhân tạo ⇒ timeout bắt đúng, không treo
-- [ ] Một `correlation-id` truy được cả 3 service trong log
+- [ ] Stopping `inventory-service` opens the breaker after a few failures; `booking` fails fast
+- [ ] Injecting 500 ms of latency trips the timeout instead of hanging
+- [ ] One `correlation-id` is traceable across all three services' logs
 
-**Thời lượng: ~1 tuần.**
+**Duration: ~1 week.**
 
 ---
 
-## 7. Giai đoạn 4 — Tranh chấp: Redis + đối soát
+## 7. Stage 4 — Contention: Redis plus reconciliation
 
-**Điều kiện vào: `baseline.md` chứng minh PostgreSQL là nút thắt.**
+**Entry condition: `baseline.md` proves PostgreSQL is the bottleneck.**
 
-| Thêm | Vì sao |
+| Add | Why |
 |---|---|
-| Redis + script Lua trong `inventory-service` | [04 §4](04-contention-strategies.md) |
-| PostgreSQL vẫn là **nguồn sự thật** | Ràng buộc `EXCLUDE` giữ nguyên, không bỏ |
-| **Đối soát** | ⚠️ **Không phải tuỳ chọn** |
+| Redis + Lua script inside `inventory-service` | [04 §4](04-contention-strategies.md) |
+| PostgreSQL stays the **source of truth** | The `EXCLUDE` constraint stays, it is not dropped |
+| **Reconciliation** | ⚠️ **Not optional** |
 
-Bài học then chốt: **mọi giải pháp tạo ra một lớp vấn đề mới.**
+The key lesson: **every solution creates a new class of problem.**
 
 ```
-Thêm Redis  ─┬─▶ nhanh hơn ~50 lần                      ✅
-             ├─▶ hai kho dữ liệu ⇒ chúng SẼ lệch nhau  ❌ mới
-             ├─▶ Redis chết ⇒ mất hold                 ❌ mới
-             └─▶ bit held rò rỉ âm thầm                ❌ mới
+Add Redis  ─┬─▶ ~50× faster                              ✅
+            ├─▶ two datastores ⇒ they WILL diverge      ❌ new
+            ├─▶ Redis dies ⇒ holds are lost             ❌ new
+            └─▶ held bits leak silently                 ❌ new
 ```
 
-Đối soát và hết-hạn-lười ([04 §9](04-contention-strategies.md)) viết **cùng giai đoạn này**.
+Reconciliation and lazy expiry ([04 §9](04-contention-strategies.md)) are written **in this
+same stage**.
 
-Điểm hay: thay đổi này nằm **trọn trong `inventory-service`**. `booking-service` không biết
-gì, API không đổi. Đó là phần thưởng cho việc đã tách service đúng từ GĐ 0.
+The good part: this change is **entirely inside `inventory-service`**. `booking-service`
+knows nothing, the API does not move. That is the payoff for having split the services
+correctly at stage 0.
 
 ```bash
 docker kill redis && sleep 5 && docker start redis
-make verify
 ```
 
-- [ ] Throughput tăng ≥20 lần so với baseline
-- [ ] `make verify` vẫn xanh
-- [ ] Giết Redis giữa test ⇒ **không mất vé đã thanh toán**
-- [ ] Đối soát tự sửa lệch trong dưới 2 phút
+- [ ] Throughput up ≥20× against baseline
+- [ ] Verify still green
+- [ ] Killing Redis mid-test loses **no paid ticket**
+- [ ] Reconciliation repairs drift in under 2 minutes
 
-**Thời lượng: ~2 tuần.**
+**Duration: ~2 weeks.**
 
 ---
 
-## 8. Giai đoạn 5 — Bất đồng bộ và saga thật
+## 8. Stage 5 — Asynchrony and a real saga
 
-**Điều kiện vào: một lời gọi đồng bộ đang bắt người dùng chờ vô ích.**
+**Entry condition: a synchronous call is making a user wait for nothing.**
 
-Thanh toán là ứng viên rõ nhất — chờ webhook 3–30 giây. Đây cũng là lúc thay **bồi hoàn ngây thơ**
-ở GĐ 0 bằng saga thật.
+Payment is the obvious candidate — a 3–30 second webhook wait. This is also when the
+stage-0 **naive compensation** is replaced by a real saga.
 
-| Thêm | Vì sao lúc này mới thêm |
+| Add | Why only now |
 |---|---|
-| Kafka | Giờ mới có luồng thật sự bất đồng bộ |
-| **Outbox pattern** | Ghi DB + phát event phải nguyên tử |
-| **Saga + bồi hoàn** | Thay try/catch + REST call của GĐ 0 |
-| `payment-service` tách ra | Chờ bên thứ ba, vòng đời riêng |
-| `ticket-service`, `notification-service` | Consumer của event, tách tự nhiên |
+| Kafka | Only now is there genuinely asynchronous work |
+| **Outbox pattern** | Writing the DB and publishing an event must be atomic |
+| **Saga + compensation** | Replaces stage 0's try/catch and REST call |
+| `payment-service` split out | Waits on a third party, has its own lifecycle |
+| `ticket-service`, `notification-service` | Event consumers, they split off naturally |
 
-**Saga mua cho bạn cái gì so với GĐ 0** — giờ bạn trả lời được chính xác:
+**What the saga buys you** — now you can answer precisely:
 
-| | GĐ 0 (bồi hoàn thô + TTL) | GĐ 5 (saga) |
+| | Stage 0 (naive compensation + TTL) | Stage 5 (saga) |
 |---|---|---|
-| Pod chết giữa chừng | Hold mồ côi 15 phút | Saga khôi phục trong vài giây |
-| Có bản ghi không? | Không — mất im lặng | Có, trạng thái saga bền vững |
-| Bồi hoàn nhiều bước | Không làm được | Làm được, có thứ tự |
-| Độ phức tạp | Rất thấp | Cao |
+| Pod dies mid-flow | Orphaned hold for 15 minutes | Saga recovers in seconds |
+| Is there a record? | No — silent loss | Yes, durable saga state |
+| Multi-step compensation | Not possible | Possible, and ordered |
+| Complexity | Very low | High |
 
 ```
-Thanh toán thất bại              ⇒ nhả chỗ
-Thanh toán timeout               ⇒ đối soát với cổng, hoàn nếu đã trừ
-Xuất vé lỗi sau khi trả tiền     ⇒ retry, KHÔNG nhả chỗ, cảnh báo
-Hold hết hạn giữa lúc thanh toán ⇒ ⚠️ khó nhất — [04 §8](04-contention-strategies.md)
+Payment fails                    ⇒ release berths
+Payment times out                ⇒ reconcile with the gateway, refund if charged
+Ticket issuance fails after pay  ⇒ retry, do NOT release berths, alert
+Hold expires during payment      ⇒ ⚠️ the hardest one — [04 §8](04-contention-strategies.md)
 ```
 
-Đây là giai đoạn dạy nhiều nhất về microservices. Đừng vội qua.
+This stage teaches the most about microservices. Do not rush it.
 
-**Thời lượng: ~3 tuần.**
+**Duration: ~3 weeks.**
 
 ---
 
-## 9. Giai đoạn 6+ — Theo nhu cầu đo được
+## 9. Stage 6+ — Against measured need
 
-| GĐ | Thêm | Điều kiện vào |
+| Stage | Add | Entry condition |
 |---|---|---|
-| **6** | Phòng chờ ảo (`waiting-room`, Go) | Load test cho thấy cửa trước sụp ở N req/giây |
-| **7** | `quota-service` chống đầu cơ | Mô phỏng được hành vi cò vé |
-| **8** | Keycloak, xác thực thật | Chuẩn bị người dùng thật |
-| **9** | Tách `fare`, `refund`, đổi vé | Hoàn thiện vòng đời |
-| **10** | Kubernetes | Compose bắt đầu vướng với ≥6 service |
-| **11** | Observability đầy đủ, chaos | Đủ service để sự cố khó truy nguyên |
+| **6** | Virtual waiting room (`waiting-room`, Go) | Load test shows the front door collapsing at N req/s |
+| **7** | `quota-service` anti-scalping | You can simulate scalper behaviour |
+| **8** | Keycloak, real authentication | Preparing for real users |
+| **9** | Split `fare`, `refund`, exchanges | Completing the lifecycle |
+| **10** | Kubernetes | Compose starts to strain at ≥6 services |
+| **11** | Full observability, chaos | Enough services that incidents are hard to trace |
 
-> **Dừng ở đâu cũng được.** Hết GĐ 5 là đã có hệ phân tán thật với saga, event, tranh chấp
-> đã giải, resilience, và lưới kiểm chứng — nhiều hơn phần lớn dự án học microservices từng đi tới.
+> **Stopping anywhere is fine.** After stage 5 you have a real distributed system with
+> sagas, events, solved contention, resilience and a verification net — further than most
+> microservices learning projects ever get.
 
 ---
 
-## 10. Tổng kết
+## 10. Summary
 
-| GĐ | Chủ đề | Thêm gì | Service | Thời lượng |
+| Stage | Theme | Adds | Services | Duration |
 |---|---|---|---|---|
-| **0** | Bộ khung CRUD | Spring Boot × 3 + gateway + 3 PostgreSQL | 3+1 | 3 tuần |
-| **1** | Lưới an toàn | 4 bất biến + k6 + CI | 3+1 | 5 ngày |
-| **2** | Đo | `baseline.md`, USL, chi phí hop mạng | 3+1 | 1 tuần |
-| **3** | Chịu lỗi | timeout, retry, circuit breaker, correlation ID | 3+1 | 1 tuần |
-| **4** | Tranh chấp | Redis Lua + đối soát | 3+1 | 2 tuần |
-| **5** | Bất đồng bộ | Kafka + outbox + saga | 5+1 | 3 tuần |
-| 6–11 | Theo nhu cầu | phòng chờ, quota, K8s, chaos | tới 12 | tuỳ |
+| **0** | CRUD skeleton | Spring Boot × 3 + gateway + 3 PostgreSQL | 3+1 | 3 weeks |
+| **1** | Safety net | 4 invariants + k6 + CI | 3+1 | 5 days |
+| **2** | Measure | `baseline.md`, USL, hop cost | 3+1 | 1 week |
+| **3** | Fault tolerance | timeouts, retry, breaker, correlation ID | 3+1 | 1 week |
+| **4** | Contention | Redis Lua + reconciliation | 3+1 | 2 weeks |
+| **5** | Asynchrony | Kafka + outbox + saga | 5+1 | 3 weeks |
+| 6–11 | As needed | waiting room, quota, K8s, chaos | up to 12 | varies |
 
-**Tới hết giai đoạn 5: ~11 tuần**, và bạn đã chạm mọi bài học cốt lõi.
+**Through stage 5: ~11 weeks**, and you have touched every core lesson.
 
 ---
 
-## 11. Bảy cách làm hỏng lộ trình này
+## 11. Seven ways to ruin this plan
 
-| Sai lầm | Hậu quả |
+| Mistake | Result |
 |---|---|
-| Dựng đủ 12 service ở GĐ 0 | 3 tháng chưa đặt được vé nào. Ba là đủ |
-| **Chung một database "cho tiện"** | Monolith đội lốt microservices. Bạn học được **con số không** |
-| Thêm Redis trước khi đo | Không biết nó giúp gì, và giờ có 2 kho dữ liệu để đồng bộ |
-| Bỏ qua giai đoạn 1 | Mọi thay đổi sau là đoán mò |
-| Bỏ qua thí nghiệm B (USL) | Bỏ lỡ bài học đắt nhất, và sẽ tin "thêm pod là nhanh hơn" cả đời |
-| Thêm retry trước idempotency key | Tự tạo ra vé trùng |
-| Thêm Kafka khi chưa có luồng async thật | Độ phức tạp mà không đổi lấy gì |
+| Building all 12 services at stage 0 | Three months and no ticket booked. Three is enough |
+| **One shared database "for now"** | A monolith in disguise. You learn **nothing** |
+| Adding Redis before measuring | You cannot tell what it helped, and now you have two datastores to sync |
+| Skipping stage 1 | Every later change is guesswork |
+| Skipping experiment B (USL) | You miss the most expensive lesson and believe "more pods is faster" forever |
+| Adding retry before idempotency keys | You manufacture duplicate tickets |
+| Adding Kafka with no real async work | Complexity bought with nothing |
 
-> Cái thứ hai nguy hiểm nhất. Nó **trông** giống microservices, chạy được, demo được —
-> và không dạy bạn bất cứ điều gì về hệ phân tán, vì mọi bài toán khó đều bị
-> `@Transactional` che mất.
+> The second is the most dangerous. It **looks** like microservices, it runs, it demos —
+> and it teaches you nothing about distributed systems, because `@Transactional` hides
+> every hard problem.
 
 ---
 
-**Quay lại:** [README](../README.md) · [04 — Contention Strategies](04-contention-strategies.md)
+**Back to:** [README](../README.md) · [04 — Contention Strategies](04-contention-strategies.md)

@@ -1,215 +1,232 @@
-# Rail Ticketing — Hệ thống bán vé tàu Tết
+# Rail Ticketing — Tết train booking system
 
-> 500.000 người bấm "Đặt vé" trong cùng một giây. 500 chỗ trên chuyến SE1 ngày 26 Tết.
-> Bán đúng 500 vé. Không thừa một vé. Không ai bị trừ tiền nhầm. Không con bot nào ôm hết.
+> 500,000 people press "Book" in the same second. 500 berths on SE1 on the 26th day of the lunar year.
+> Sell exactly 500 tickets. Not one more. Nobody charged twice. No bot takes the lot.
 >
-> Hệ thống microservices được thiết kế để học **tranh chấp phân tán** — bài toán mà
-> thêm server không giải quyết được.
+> A microservices system built to learn **distributed contention** — the problem that
+> adding servers does not solve.
 
-Stack: **Java 21 / Spring Boot 3.3** · **Redis** (hot path tồn kho) · **PostgreSQL** (nguồn sự thật) ·
-**Kafka** · **React** (web) · **k3d** (local, $0)
+Stack: **Java 21 / Spring Boot 4.1** · **Redis** (hot inventory path) · **PostgreSQL** (source of truth) ·
+**Kafka** · **React** · **k3d** (local, $0)
 
 ---
 
-## 1. Luận điểm kiến trúc
+## 1. The architectural claim
 
-Đa số hệ thống bán vé được thiết kế cho **quy mô** (scale). Bài toán này không phải quy mô — nó là **tranh chấp** (contention). Hai thứ khác nhau về bản chất và đòi hỏi kiến trúc ngược nhau:
+Most ticketing systems are designed for **scale**. This problem is not scale — it is
+**contention**. They are different in kind and pull architecture in opposite directions:
 
-| | Quy mô | Tranh chấp |
+| | Scale | Contention |
 |---|---|---|
-| Hình dạng tải | 500k request/giây trải trên 500k mục khác nhau | 500k request/giây cho **cùng 500 chỗ** |
-| Giải bằng | Sharding, thêm replica, cache | **Không thêm server nào giúp được** |
-| Nút thắt | Băng thông, CPU | **Một dòng dữ liệu duy nhất** |
-| Sai thì sao | Chậm | **Bán thừa vé — sai về mặt nghiệp vụ** |
+| Load shape | 500k req/s across 500k different items | 500k req/s for **the same 500 berths** |
+| Solved by | Sharding, replicas, cache | **No number of servers helps** |
+| Bottleneck | Bandwidth, CPU | **One row of data** |
+| Failure mode | Slow | **Overselling — a business error** |
 
-Thêm 100 pod cho service đặt vé **làm vấn đề tệ hơn**: 100 tiến trình cùng tranh một hàng trong database, khoá xếp chồng, throughput giảm. Đây là nghịch lý mà chỉ bài toán tranh chấp mới có, và là lý do domain này dạy được thứ mà CRUD không dạy được.
+Adding 100 pods to the booking service **makes it worse**: 100 processes fight over one
+database row, locks queue, throughput drops. That paradox is unique to contention, and it
+is why this domain teaches what CRUD cannot.
 
-### Bốn đặc tính định hình toàn bộ thiết kế
+### Four properties that shape the whole design
 
 ```
-1. TỒN KHO LÀ KHOẢNG, KHÔNG PHẢI BOOLEAN
-   Ghế 12A chuyến SE1:
-   HN ──── Vinh ──── Huế ──── ĐN ──── NT ──── SG
+1. INVENTORY IS AN INTERVAL, NOT A BOOLEAN
+   Berth 12A on SE1:
+   HN ──── Vinh ──── Hue ──── DN ──── NT ──── SG
    │                  │       │               │
-   └─ khách A ────────┘       └─ khách B ─────┘
-        (không xung đột — cùng một ghế, hai khách)
+   └─ passenger A ────┘       └─ passenger B ─┘
+        (no conflict — one berth, two passengers)
 
-2. TẢI KHÔNG ĐỀU ĐẾN MỨC PHI LÝ
-   360 ngày/năm:  ~50 request/giây
-   Giờ mở bán Tết: ~500.000 request trong 60 giây
-   Tỉ lệ 10.000:1
+2. LOAD IS ABSURDLY UNEVEN
+   360 days a year:    ~50 req/s
+   Tết sale opening:   ~500,000 req in 60 seconds
+   Ratio 10,000:1
 
-3. ĐỐI THỦ CÓ THẬT
-   Bot của "cò vé" xoay IP, xoay tài khoản, gọi API trực tiếp.
-   Chống bằng hạ tầng (rate limit IP) là thua. Phải chống bằng DANH TÍNH.
+3. THE ADVERSARY IS REAL
+   Scalper bots rotate IPs, rotate accounts, call the API directly.
+   Defending with infrastructure (IP rate limits) loses. Defend by IDENTITY.
 
-4. ĐÚNG/SAI LÀ NHỊ PHÂN VÀ CHỨNG MINH ĐƯỢC
+4. CORRECTNESS IS BINARY AND PROVABLE
    SELECT count(*) FROM ticket WHERE train='SE1' AND date='2026-02-14';
-   Đúng 500. Hoặc bạn sai.
+   Exactly 500. Or you are wrong.
 ```
 
-### Hệ quả: chia service theo **hình dạng tải**
+### Consequence: split services by **load shape**
 
 ```
-QUEUE PLANE      waiting-room · gateway              ← hấp thụ đợt sóng, xả đều
+QUEUE PLANE      waiting-room · gateway              ← absorb the surge, release evenly
                           │
-CATALOG PLANE    schedule · fare · station           ← đọc 10.000:1, cache mạnh, dữ liệu lạnh
+CATALOG PLANE    schedule · fare · station           ← 10,000:1 reads, cacheable, cold data
                           │
-CONTENTION PLANE inventory · booking · quota         ← ⭐ TRANH CHẤP CAO, nhất quán mạnh
-                          │                             phân vùng theo CHUYẾN TÀU
-FULFILLMENT      payment · ticket · notification     ← async, chịu được chậm
+CONTENTION PLANE inventory · booking · quota         ← ⭐ HIGH CONTENTION, strong consistency
+                          │                             partitioned BY TRIP
+FULFILLMENT      payment · ticket · notification     ← async, tolerates delay
                           │
-RECOVERY         refund · reconciliation             ← chạy nền, sửa sai lệch
+RECOVERY         refund · reconciliation             ← background, repairs drift
 ```
 
-`inventory-service` là **trái tim và điểm nghẽn**. Mọi quyết định kiến trúc khác tồn tại để bảo vệ nó.
+`inventory-service` is **the heart and the bottleneck**. Every other architectural
+decision exists to protect it.
 
 ---
 
-## 2. Bài toán trung tâm: tồn kho theo chặng
+## 2. The core problem: segment inventory
 
-Một chuyến tàu có các ga $S_0, S_1, \dots, S_n$ và $n$ **chặng** (leg).
-Khách đi từ $S_a$ đến $S_b$ chiếm các chặng $L_a, L_{a+1}, \dots, L_{b-1}$.
+A trip has stations $S_0, S_1, \dots, S_n$ and $n$ **legs**.
+A passenger travelling $S_a \to S_b$ occupies legs $L_a, L_{a+1}, \dots, L_{b-1}$.
 
-Biểu diễn bằng **bitmask**:
+Represent that as a **bitmask**:
 
 ```
-SE1:  HN(0) ── Vinh(1) ── Huế(2) ── ĐN(3) ── NT(4) ── SG(5)
-Chặng:     L0        L1        L2       L3       L4        → 5 bit
+SE1:  HN(0) ── Vinh(1) ── Hue(2) ── DN(3) ── NT(4) ── SG(5)
+Legs:      L0        L1       L2       L3       L4        → 5 bits
 
-Khách A: HN → Huế   = L0,L1        = 0b00011
-Khách B: ĐN → SG    = L3,L4        = 0b11000
-Khách C: Vinh → NT  = L1,L2,L3     = 0b01110
+Passenger A: HN → Hue   = L0,L1        = 0b00011
+Passenger B: DN → SG    = L3,L4        = 0b11000
+Passenger C: Vinh → NT  = L1,L2,L3     = 0b01110
 
-A & B = 0  ⇒ KHÔNG xung đột, dùng chung ghế được
-A & C ≠ 0  ⇒ xung đột
+A & B = 0  ⇒ NO conflict, they can share a berth
+A & C ≠ 0  ⇒ conflict
 ```
 
-**Kiểm tra xung đột = một phép AND.** Đặt chỗ = một phép OR. Cả hai đều là lệnh CPU đơn.
+**A conflict check is one AND. A reservation is one OR.** Both are single CPU instructions.
 
-### Phát hiện quyết định toàn bộ kiến trúc
+### The observation that decides the architecture
 
-Tuyến dài nhất Việt Nam (Hà Nội – Sài Gòn) có ~30 ga ⇒ **29 chặng ⇒ vừa một `int32`**.
+Vietnam's longest line (Hanoi–Saigon) has ~30 stations ⇒ **29 legs ⇒ fits in one `int32`**.
 
-Một chuyến tàu ~500 chỗ. Toàn bộ tồn kho của một chuyến:
+A trip has ~500 berths. Its entire inventory:
 
 $$
-500 \text{ chỗ} \times (4 + 4) \text{ byte} = \mathbf{4\ KB}
+500 \text{ berths} \times (4 + 4) \text{ bytes} = \mathbf{4\ KB}
 $$
 
-Mỗi chỗ cần **hai** mask — `occupied` (đã bán) và `held` (đang giữ tạm).
+Each berth needs **two** masks — `occupied` (sold) and `held` (temporarily reserved).
 
-**Toàn bộ tồn kho một chuyến tàu nằm gọn trong 4 KB.** Nó vừa một lần ghi Redis, vừa một script Lua nguyên tử, vừa một dòng cache CPU. Đây là chi tiết khiến bài toán tranh chấp cực đoan này trở nên giải được — và là thứ bạn sẽ không nhận ra nếu mô hình hoá tồn kho bằng "một dòng SQL cho mỗi ghế".
+**A whole trip's inventory fits in 4 KB.** It fits in one Redis write, one atomic Lua
+script, one CPU cache line. That detail is what makes this extreme contention problem
+solvable — and you would never see it if you modelled inventory as one SQL row per seat.
 
-Chi tiết đầy đủ: [03 — Segment Inventory Engine](docs/03-segment-inventory-engine.md).
+Full detail: [03 — Segment Inventory Engine](docs/03-segment-inventory-engine.md).
 
 ---
 
-## 3. Bốn cách giải tranh chấp — và bạn sẽ thử cả bốn
+## 3. Four ways to solve contention — you will build all four
 
-Đây là bài tập học giá trị nhất của dự án. Mỗi cách **hỏng theo một kiểu khác nhau**, và bạn chỉ thật sự hiểu khi tự thấy nó hỏng.
+This is the most valuable exercise in the project. Each approach **fails differently**,
+and you only understand that by watching it fail.
 
-| Cách | Throughput (1 chuyến) | Hỏng thế nào |
+| Approach | Throughput (1 trip) | How it breaks |
 |---|---|---|
-| `SELECT FOR UPDATE` trên PostgreSQL | ~200/giây | Khoá xếp hàng, connection pool cạn, cả service treo |
-| Optimistic lock + retry | ~800/giây | **Bão retry** — càng tranh chấp càng nhiều retry, throughput sụp |
-| **Redis + Lua nguyên tử** | **~25.000/giây** | Nhanh, nhưng **mất bền vững** — Redis chết là mất chỗ đã giữ |
-| Single-writer theo chuyến (Kafka partition) | ~8.000/giây | Đúng và có thứ tự, nhưng độ trễ p99 cao |
+| `SELECT FOR UPDATE` on PostgreSQL | ~200/s | Locks queue, connection pool drains, the service hangs |
+| Optimistic lock + retry | ~800/s | **Retry storm** — more contention means more retries, throughput collapses |
+| **Redis + atomic Lua** | **~25,000/s** | Fast, but **loses durability** — Redis dies, holds are gone |
+| Single-writer per trip (Kafka partition) | ~8,000/s | Correct and ordered, but high p99 latency |
 
-Thiết kế cuối dùng **Redis Lua + PostgreSQL làm nguồn sự thật + đối soát nền**. Chi tiết và cách đo: [04 — Contention Strategies](docs/04-contention-strategies.md).
+The final design uses **Redis Lua + PostgreSQL as source of truth + background
+reconciliation**. Detail and measurement: [04 — Contention Strategies](docs/04-contention-strategies.md).
 
 ---
 
-## 4. Bản đồ service
+## 4. Service map
 
-| Service | Plane | Ngôn ngữ | Datastore | Vì sao tách riêng |
+| Service | Plane | Language | Datastore | Why it is separate |
 |---|---|---|---|---|
-| `api-gateway` | Queue | Java | — | Xác thực, rate limit theo danh tính |
-| **`waiting-room`** | Queue | **Go** | Redis | Giữ 500k kết nối chờ — Java tốn RAM gấp 6 lần |
-| `schedule-service` | Catalog | Java | PostgreSQL + Redis | Đọc 10.000:1, cache 24h |
-| `fare-service` | Catalog | Java | PostgreSQL | Quy tắc giá vé, tính sẵn |
-| **`inventory-service`** | Contention | **Java** | **Redis + PostgreSQL** | ⭐ Trái tim. Phân vùng theo chuyến |
+| `api-gateway` | Queue | Java | — | Auth, rate limiting by identity |
+| **`waiting-room`** | Queue | **Go** | Redis | Holds 500k waiting connections — Java needs 6× the RAM |
+| `schedule-service` | Catalog | Java | PostgreSQL + Redis | 10,000:1 reads, 24h cache |
+| `fare-service` | Catalog | Java | PostgreSQL | Pricing rules, precomputed |
+| **`inventory-service`** | Contention | **Java** | **Redis + PostgreSQL** | ⭐ The heart. Partitioned by trip |
 | `booking-service` | Contention | Java | PostgreSQL | Saga orchestrator |
-| `quota-service` | Contention | Java | Redis + PostgreSQL | Chống đầu cơ theo CCCD |
-| `payment-service` | Fulfillment | Java | PostgreSQL | Tích hợp VNPay/MoMo, bất đồng bộ |
-| `ticket-service` | Fulfillment | Java | PostgreSQL + S3 | Sinh mã QR, PDF |
+| `quota-service` | Contention | Java | Redis + PostgreSQL | Anti-scalping by national ID |
+| `payment-service` | Fulfillment | Java | PostgreSQL | VNPay/MoMo, asynchronous |
+| `ticket-service` | Fulfillment | Java | PostgreSQL + S3 | QR codes, PDFs |
 | `notification-service` | Fulfillment | Java | PostgreSQL | SMS/Zalo/email |
-| `refund-service` | Recovery | Java | PostgreSQL | Saga ngược |
-| **`reconciliation`** | Recovery | Java | PostgreSQL | ⭐ Đối soát Redis ↔ PostgreSQL |
+| `refund-service` | Recovery | Java | PostgreSQL | Reverse saga |
+| **`reconciliation`** | Recovery | Java | PostgreSQL | ⭐ Redis ↔ PostgreSQL drift repair |
 
-12 service, và **mọi service đều xoay quanh một bài toán khó duy nhất**: bảo vệ tính đúng đắn của tồn kho dưới tranh chấp. `inventory-service` là trung tâm; 11 service còn lại tồn tại để phục vụ, bảo vệ, hoặc sửa chữa nó.
+Twelve services, and **every one of them orbits a single hard problem**: keeping inventory
+correct under contention. `inventory-service` is the centre; the other eleven exist to
+serve it, protect it, or repair it.
 
 ---
 
-## 5. Dữ liệu — sinh bằng code, không cần curate
+## 5. Data — generated, not curated
 
-Toàn bộ dữ liệu nền của hệ thống hoặc **sinh bằng code**, hoặc **do chính việc dùng hệ thống tạo ra**. Không có hạng mục nào phải đi thu thập, đối chiếu, hay kiểm chứng với thế giới thật:
+Every piece of seed data is either **generated by code** or **produced by using the
+system**. Nothing has to be collected, cross-checked, or verified against the real world:
 
-| Dữ liệu | Cách có | Công sức |
+| Data | How | Effort |
 |---|---|---|
-| ~20 ga chính tuyến Bắc–Nam | Danh sách công khai, gõ tay | **15 phút** |
-| Sơ đồ toa (ghế mềm 64, khoang 6 × 42, khoang 4 × 28) | **Vòng lặp sinh ra** | **1 giờ code** |
-| ~200 chuyến × 20 ngày Tết | Generator | **1 giờ code** |
-| Bảng giá theo hạng chỗ, tầng giường | Công thức | **30 phút** |
-| Hành khách, đơn hàng, thanh toán | **Do chính việc dùng hệ thống sinh ra** | **0** |
-| Tải 500k người dùng | **Load generator (k6)** — và nó là phần thú vị | 4 giờ code |
-| | **Tổng** | **~7 giờ** |
+| ~20 stations on the North–South line | Public list, typed by hand | **15 min** |
+| Carriage layouts (soft seat 64, 6-berth × 42, 4-berth × 28) | **A loop** | **1 hour** |
+| ~200 trips × 20 Tết days | Generator | **1 hour** |
+| Prices by class and bunk level | Formula | **30 min** |
+| Passengers, orders, payments | **Produced by using the system** | **0** |
+| 500k-user load | **Load generator (k6)** — and it is the fun part | 4 hours |
+| | **Total** | **~7 hours** |
 
-**~7 giờ và bạn viết code từ ngày đầu tiên.** Đây là tiêu chí chọn domain có chủ đích: bài học nằm ở *hành vi hệ thống dưới tải*, không ở việc gõ dữ liệu — nên dữ liệu phải rẻ.
+**Seven hours, and you write code from day one.** That was a deliberate criterion for
+choosing this domain: the lesson lives in *system behaviour under load*, not in data
+entry — so the data has to be cheap.
 
 ---
 
-## 6. Mục lục tài liệu
+## 6. Documents
 
-| # | Tài liệu | Nội dung |
+| # | Document | Contents |
 |---|---|---|
-| 01 | [Domain Model](docs/01-domain-model.md) | Event storming, bounded context, ubiquitous language |
-| 02 | [Architecture](docs/02-architecture.md) | 5 plane, C4, lý do chọn công nghệ |
-| **03** | [**Segment Inventory Engine**](docs/03-segment-inventory-engine.md) | ⭐ Bitmask, thuật toán chọn chỗ, insight 4 KB |
-| **04** | [**Contention Strategies**](docs/04-contention-strategies.md) | ⭐ 4 cách, benchmark, cách nào hỏng khi nào |
-| **05** | [**Build Progression**](docs/05-build-progression.md) | ⭐ **Bắt đầu từ đây** — API thường trước, hạ tầng thêm sau theo số đo được |
+| 01 | [Domain Model](docs/01-domain-model.md) | Event storming, bounded contexts, ubiquitous language |
+| 02 | [Architecture](docs/02-architecture.md) | Five planes, C4, technology choices |
+| **03** | [**Segment Inventory Engine**](docs/03-segment-inventory-engine.md) | ⭐ Bitmasks, berth selection, the 4 KB insight |
+| **04** | [**Contention Strategies**](docs/04-contention-strategies.md) | ⭐ Four approaches, benchmarks, how each one breaks |
+| **05** | [**Build Progression**](docs/05-build-progression.md) | ⭐ **Start here** — ordinary API first, infrastructure added against measurements |
 
-> **Lần đầu đọc?** Kiến trúc ở [02](docs/02-architecture.md) là **đích đến**, không phải điểm xuất phát.
-> Đọc [**05 — Build Progression**](docs/05-build-progression.md) để biết dựng cái gì trước, cái gì sau,
-> và **điều kiện để được phép thêm mỗi mảnh hạ tầng**.
+Decisions taken while building are recorded in [docs/adr/](docs/adr/). Commands are in
+[docs/COMMANDS.md](docs/COMMANDS.md).
 
-> Đang xây tiếp: danh mục service · schema DB · API contract · saga & event ·
-> phòng chờ ảo · chống đầu cơ · load test · sprint backlog.
+> **First read?** The architecture in [02](docs/02-architecture.md) is the **destination**,
+> not the starting point. Read [**05 — Build Progression**](docs/05-build-progression.md)
+> for what to build first, what comes later, and **what must be measured before each piece
+> of infrastructure is allowed in**.
 
 ---
 
-## 7. Bạn học được gì
+## 7. What you learn
 
-| Chủ đề | Học qua việc |
+| Topic | By doing |
 |---|---|
-| **Tranh chấp phân tán** | Dựng cả 4 cách giải và tự thấy từng cách gãy ([04](docs/04-contention-strategies.md)) |
-| **Luật khả mở rộng phổ quát** | Tăng từ 1 lên 200 pod và nhìn throughput **tụt xuống** |
-| **Phân vùng thắng nhân bản** | Cùng RPS, 200 chuyến vs 1 chuyến — chênh lệch hai bậc độ lớn |
-| **Nguyên tử không cần khoá** | Redis Lua đơn luồng thay cho khoá phân tán |
-| **Đánh đổi bền vững** | Redis nhanh nhưng mất dữ liệu; thiết kế để mất 1 giây không quan trọng |
-| **Đối soát hai kho dữ liệu** | Cái giá bắt buộc phải trả khi có cache ghi được |
-| **Saga & bồi hoàn** | Giữ chỗ → thanh toán → xuất vé, và mọi nhánh thất bại |
-| **Hẹn giờ phân tán** | 100.000 hold hết hạn, và chiếc bẫy rò rỉ âm thầm ([04 §9](docs/04-contention-strategies.md)) |
-| **Backpressure ở tầng sản phẩm** | Phòng chờ ảo hiệu quả hơn mọi circuit breaker |
-| **Thiết kế chống đối thủ** | Cò vé là tác nhân trong sơ đồ context, không phải mục "bảo mật" phụ |
-| **Bất biến kiểm chứng bằng máy** | 4 truy vấn SQL chạy sau mỗi load test trong CI |
+| **Distributed contention** | Building all four solutions and watching each one break ([04](docs/04-contention-strategies.md)) |
+| **Universal Scalability Law** | Going from 1 to 200 pods and watching throughput **fall** |
+| **Partitioning beats replication** | Same RPS, 200 trips vs 1 trip — two orders of magnitude apart |
+| **Atomicity without locks** | Single-threaded Redis Lua instead of a distributed lock |
+| **The durability trade** | Redis is fast and loses data; design so that losing one second does not matter |
+| **Reconciling two datastores** | The unavoidable price of a writable cache |
+| **Sagas and compensation** | Hold → pay → issue, and every failure branch |
+| **Distributed timers** | 100,000 holds expiring, and the silent leak ([04 §9](docs/04-contention-strategies.md)) |
+| **Backpressure at the product layer** | A virtual waiting room beats every circuit breaker |
+| **Designing against an adversary** | Scalpers are an actor in the context diagram, not a security footnote |
+| **Machine-checked invariants** | Four SQL queries after every load test in CI |
 
-Ba bài học phản trực giác nhất — và vì vậy đáng giá nhất:
+The three most counter-intuitive lessons, and therefore the most valuable:
 
-1. **Thêm server làm chậm hơn** khi nút thắt là tranh chấp, không phải tài nguyên
-2. **Thuật toán chọn chỗ thông minh hơn làm hệ thống chậm hơn** ([03 §6](docs/03-segment-inventory-engine.md))
-3. **Giảm tranh chấp bằng thiết kế sản phẩm** hiệu quả hơn mọi tối ưu khoá
+1. **Adding servers makes it slower** when the bottleneck is contention, not resources
+2. **A smarter berth-selection algorithm makes the system slower** ([03 §6](docs/03-segment-inventory-engine.md))
+3. **Reducing contention by product design** beats every lock optimisation
 
 ---
 
-## 8. Chạy thử
+## 8. Running it
 
 ```bash
-make infra-up      # Redis, PostgreSQL, Kafka, Keycloak
-make seed          # sinh 20 ga, 200 chuyến, 20 ngày Tết — bằng code, không cần dữ liệu ngoài
-make services-up
-make loadtest      # k6: 10.000 người tranh 500 chỗ
-make verify        # đếm vé bán ra — phải đúng 500
+docker compose up -d postgres                    # database only — the normal dev loop
+docker compose --profile services up -d --build  # everything in containers
 ```
 
-`make verify` chạy 4 truy vấn bất biến ([03 §12](docs/03-segment-inventory-engine.md)). Đỏ một cái là build fail — **một cài đặt nhanh gấp 100 lần nhưng bán thừa 3 vé là sai, không phải "nhanh hơn"**.
+Full command list, including the contract lint and the per-service ports, is in
+[docs/COMMANDS.md](docs/COMMANDS.md).
+
+Once stage 1 exists, `tools/verify` runs the four invariant queries
+([03 §12](docs/03-segment-inventory-engine.md)) after every load test, and a red one fails
+the build — **an implementation that is 100× faster but sells 3 extra tickets is wrong,
+not "faster"**.
