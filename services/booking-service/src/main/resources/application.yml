@@ -1,0 +1,63 @@
+spring:
+  application:
+    name: booking-service
+
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/bookingdb
+    username: ${DB_USER:booking_user}
+    password: ${DB_PASSWORD:booking_pw}
+    hikari:
+      maximum-pool-size: 10
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema. Hibernate only checks it.
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: ${SERVER_PORT:8083}
+  error:
+    include-message: never   # Errors go out as RFC 9457, never as Spring's default body
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{correlationId:-}] %logger{36} - %msg%n"
+
+# Downstream services are reached by URL from the environment. docker-compose
+# provides the DNS names; there is no service discovery at stage 0 and none is
+# needed for four services.
+#
+# No timeouts, retries or circuit breakers here on purpose. Those arrive at
+# stage 3, after stage 2 has shown how these calls actually fail.
+clients:
+  inventory:
+    base-url: ${INVENTORY_URL:http://localhost:8082}
+  schedule:
+    base-url: ${SCHEDULE_URL:http://localhost:8081}
+
+booking:
+  payment:
+    # Stage 0 payment is a coin flip inside this service. payment-service
+    # becomes real at stage 5, when it has a third party to wait for.
+    mock-success-rate: 0.9

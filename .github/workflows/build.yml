@@ -1,0 +1,64 @@
+# Compile and test every module. Runs on the same commands as docs/COMMANDS.md
+# (ADR-0006) so a green CI and a green laptop mean the same thing.
+
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+
+  build:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'      # matches maven.compiler.release and the Docker base image
+          cache: maven
+
+      # Testcontainers needs a Docker daemon. ubuntu-latest runners have one,
+      # so the integration tests run here exactly as they do locally — no
+      # separate Postgres service container, no second configuration to keep
+      # in sync with docker-compose.yaml.
+      - name: verify
+        run: ./mvnw -B -T1C verify
+
+      - name: Upload surefire reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/**'
+          retention-days: 7
+
+  docker:
+    name: images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Catches the two mistakes that only show up in a container build and
+      # never locally: a Dockerfile that forgets a module pom (the aggregator
+      # refuses to parse), and a jar that was never repackaged (the container
+      # dies with "no main manifest attribute").
+      - name: build all four images
+        run: |
+          for svc in api-gateway schedule-service inventory-service booking-service; do
+            echo "::group::$svc"
+            docker build -f "services/$svc/Dockerfile" -t "$svc:ci" .
+            echo "::endgroup::"
+          done
+
+      - name: every image must produce an executable jar
+        run: |
+          for svc in api-gateway schedule-service inventory-service booking-service; do
+            docker run --rm --entrypoint sh "$svc:ci" -c \
+              'unzip -p /app/app.jar META-INF/MANIFEST.MF | grep -q "^Start-Class:"' \
+              || { echo "$svc: jar is not an executable Spring Boot jar"; exit 1; }
+          done

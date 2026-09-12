@@ -1,0 +1,55 @@
+spring:
+  application:
+    name: api-gateway
+
+  threads:
+    virtual:
+      enabled: true
+
+  cloud:
+    gateway:
+      server:
+        webmvc:
+          routes:
+            - id: schedule
+              uri: ${SCHEDULE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/trips/**
+
+            - id: inventory-availability
+              uri: ${INVENTORY_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/v1/trips/*/availability
+
+            - id: inventory-holds
+              uri: ${INVENTORY_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/v1/holds/**
+
+            - id: booking
+              uri: ${BOOKING_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/v1/bookings/**
+
+# Route order matters: /api/v1/trips/*/availability is owned by inventory, but
+# it sits under the same prefix as schedule's /api/v1/trips/**. The more
+# specific route must win, so keep it declared before the schedule route and
+# verify it with a request, not by reading this comment.
+
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{correlationId:-}] %logger{36} - %msg%n"

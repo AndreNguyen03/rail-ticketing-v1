@@ -1,0 +1,14 @@
+# Lint configuration for contracts/openapi.yaml.
+#
+# Version-controlled on purpose: without it redocly falls back to "recommended",
+# which changes as the image is updated, so the same spec could pass today and
+# fail tomorrow. CI runs this file.
+
+extends:
+  - recommended
+
+rules:
+  # No deployment exists outside localhost until stage 10 (Kubernetes).
+  # Inventing a production URL that does not resolve would be worse than
+  # pointing at the local gateway.
+  no-server-example.com: off

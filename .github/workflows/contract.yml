@@ -1,0 +1,54 @@
+# Writing the API contract without wiring this workflow makes the contract
+# pointless (ADR-0004): a spec nothing reads is worse than a markdown table,
+# because it also drifts from the implementation.
+
+name: contract
+
+on:
+  pull_request:
+    paths:
+      - 'contracts/**'
+      - 'redocly.yaml'
+      - '.github/workflows/contract.yml'
+  push:
+    branches: [main]
+
+jobs:
+
+  lint:
+    name: lint spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: redocly lint
+        run: |
+          docker run --rm -v "$PWD:/spec" -w /spec \
+            redocly/cli lint contracts/openapi.yaml
+
+  breaking-change:
+    name: no breaking change vs main
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract the spec as it exists on main
+        run: |
+          mkdir -p /tmp/base
+          if git cat-file -e "origin/${{ github.base_ref }}:contracts/openapi.yaml" 2>/dev/null; then
+            git show "origin/${{ github.base_ref }}:contracts/openapi.yaml" > /tmp/base/openapi.yaml
+          else
+            echo "No spec on ${{ github.base_ref }} yet — comparing against self."
+            cp contracts/openapi.yaml /tmp/base/openapi.yaml
+          fi
+
+      - name: openapi-diff
+        run: |
+          docker run --rm \
+            -v /tmp/base:/base:ro \
+            -v "$PWD/contracts:/head:ro" \
+            openapitools/openapi-diff:latest \
+            --fail-on-incompatible \
+            /base/openapi.yaml /head/openapi.yaml

@@ -1,0 +1,58 @@
+spring:
+  application:
+    name: inventory-service
+
+  # Virtual threads: this service is I/O bound and spends its time waiting on
+  # Postgres row locks. Platform threads would cap concurrency at the pool size.
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/inventorydb
+    username: ${DB_USER:inventory_user}
+    password: ${DB_PASSWORD:inventory_pw}
+    hikari:
+      maximum-pool-size: 10
+      # Deliberately small. Stage 2 measures what happens when many threads
+      # contend for the same rows; a large pool would hide the effect.
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema. Hibernate only checks it.
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    # V2 is a development fixture. Exclude it once tools/seed exists (step 8)
+    # by setting SPRING_FLYWAY_IGNORE_MIGRATION_PATTERNS or moving it out.
+
+server:
+  port: ${SERVER_PORT:8082}
+  error:
+    include-message: never   # Errors go out as RFC 9457, never as Spring's default body
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+inventory:
+  hold:
+    ttl-seconds: 900          # 15 minutes. The TTL is what makes naive
+                              # compensation safe at stage 0 (ADR-0003 context).
+    sweep-interval-ms: 30000  # @Scheduled expiry sweep. Distributed timers are
+                              # a stage 4 problem.
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{correlationId:-}] %logger{36} - %msg%n"

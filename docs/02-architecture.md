@@ -106,7 +106,7 @@ graph TB
 
 ## 3. Vì sao chia theo **hình dạng tải**
 
-Fitness chia theo mặt phẳng *vận hành*. Ở đây tiêu chí sắc hơn: **hình dạng tải và yêu cầu nhất quán**.
+Cách chia service thông thường — theo thực thể (`user`, `booking`, `ticket`) — che mất điều quan trọng nhất ở đây: bốn nhóm chức năng có **hình dạng tải và yêu cầu nhất quán khác nhau về bản chất**, và chúng scale theo những cách không tương thích với nhau.
 
 | Plane | Tải | Nhất quán | Scale bằng | Hỏng thì |
 |---|---|---|---|---|
@@ -137,7 +137,7 @@ Trái tim hệ thống. Không có tầng nào một mình đủ.
               ┌─────────────────────────────────────┐
    ĐƯỜNG NÓNG │  REDIS  — shard theo tripId         │
    (giữ chỗ)  │  · Script Lua = nguyên tử           │
-              │  · 2 KB/chuyến, vừa 1 lệnh          │
+              │  · 4 KB/chuyến, vừa 1 lệnh          │
               │  · ~25.000 op/giây/shard            │
               │  · ❌ mất khi Redis chết             │
               └──────────────┬──────────────────────┘
@@ -197,14 +197,14 @@ Tốc độ xả là **cần gạt vận hành**: thấy `inventory-service` p99
 
 | Quyết định | Chọn | Đã cân nhắc | Lý do |
 |---|---|---|---|
-| Tồn kho đường nóng | **Redis + Lua** | Postgres thuần, Hazelcast, in-memory | Lua chạy nguyên tử single-thread ⇒ **không cần khoá**. 2 KB/chuyến vừa một lệnh |
+| Tồn kho đường nóng | **Redis + Lua** | Postgres thuần, Hazelcast, in-memory | Lua chạy nguyên tử single-thread ⇒ **không cần khoá**. 4 KB/chuyến vừa một lệnh |
 | Nguồn sự thật | **PostgreSQL** | Cassandra, DynamoDB | Cần transaction thật cho booking + tiền. Ràng buộc CHECK chống chồng chặng |
 | Phòng chờ | **Go** | Java WebFlux, Nginx+Lua | 500k kết nối rỗi — RAM/kết nối là chỉ số quyết định |
 | Phần còn lại | **Java 21 + Spring Boot** | — | Virtual threads hợp service I/O-bound; hệ sinh thái |
 | Event | **Kafka** | RabbitMQ, NATS | Phân vùng theo `tripId` cho **thứ tự trong một chuyến**; replay khi dựng lại tồn kho |
 | Load test | **k6** | JMeter, Gatling | Viết bằng JS, dễ mô phỏng 10k VU tranh 500 chỗ |
 | Chống bot | **Định danh + quota**, không phải IP | Cloudflare, captcha | Cò vé xoay IP dễ; xoay CCCD khó |
-| Deploy | **k3d local** | — | [Học $0](https://example.invalid) — xem tài liệu dự án fitness |
+| Deploy | **k3d local** | Cloud managed K8s | Toàn bộ dự án chạy được trên laptop 16 GB, $0. Tranh chấp mô phỏng được ở local; chỉ độ trễ mạng thật là không |
 
 ### Vì sao Redis Lua thay vì khoá phân tán (Redlock)
 

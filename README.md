@@ -94,10 +94,12 @@ Tuyến dài nhất Việt Nam (Hà Nội – Sài Gòn) có ~30 ga ⇒ **29 ch�
 Một chuyến tàu ~500 chỗ. Toàn bộ tồn kho của một chuyến:
 
 $$
-500 \text{ chỗ} \times 4 \text{ byte} = \mathbf{2\ KB}
+500 \text{ chỗ} \times (4 + 4) \text{ byte} = \mathbf{4\ KB}
 $$
 
-**Toàn bộ tồn kho một chuyến tàu nằm gọn trong 2 KB.** Nó vừa một lần ghi Redis, vừa một script Lua nguyên tử, vừa một dòng cache CPU. Đây là chi tiết khiến bài toán tranh chấp cực đoan này trở nên giải được — và là thứ bạn sẽ không nhận ra nếu mô hình hoá tồn kho bằng "một dòng SQL cho mỗi ghế".
+Mỗi chỗ cần **hai** mask — `occupied` (đã bán) và `held` (đang giữ tạm).
+
+**Toàn bộ tồn kho một chuyến tàu nằm gọn trong 4 KB.** Nó vừa một lần ghi Redis, vừa một script Lua nguyên tử, vừa một dòng cache CPU. Đây là chi tiết khiến bài toán tranh chấp cực đoan này trở nên giải được — và là thứ bạn sẽ không nhận ra nếu mô hình hoá tồn kho bằng "một dòng SQL cho mỗi ghế".
 
 Chi tiết đầy đủ: [03 — Segment Inventory Engine](docs/03-segment-inventory-engine.md).
 
@@ -135,13 +137,13 @@ Thiết kế cuối dùng **Redis Lua + PostgreSQL làm nguồn sự thật + đ
 | `refund-service` | Recovery | Java | PostgreSQL | Saga ngược |
 | **`reconciliation`** | Recovery | Java | PostgreSQL | ⭐ Đối soát Redis ↔ PostgreSQL |
 
-12 service. Ít hơn fitness (18) nhưng **mật độ bài học cao hơn** — vì mọi service đều xoay quanh một bài toán khó duy nhất thay vì trải ra nhiều miền.
+12 service, và **mọi service đều xoay quanh một bài toán khó duy nhất**: bảo vệ tính đúng đắn của tồn kho dưới tranh chấp. `inventory-service` là trung tâm; 11 service còn lại tồn tại để phục vụ, bảo vệ, hoặc sửa chữa nó.
 
 ---
 
 ## 5. Dữ liệu — sinh bằng code, không cần curate
 
-Đây là lý do domain này nhẹ hơn fitness hẳn một bậc:
+Toàn bộ dữ liệu nền của hệ thống hoặc **sinh bằng code**, hoặc **do chính việc dùng hệ thống tạo ra**. Không có hạng mục nào phải đi thu thập, đối chiếu, hay kiểm chứng với thế giới thật:
 
 | Dữ liệu | Cách có | Công sức |
 |---|---|---|
@@ -153,7 +155,7 @@ Thiết kế cuối dùng **Redis Lua + PostgreSQL làm nguồn sự thật + đ
 | Tải 500k người dùng | **Load generator (k6)** — và nó là phần thú vị | 4 giờ code |
 | | **Tổng** | **~7 giờ** |
 
-So với **65–350 giờ** curate nội dung của dự án fitness. Bạn viết code từ ngày đầu tiên.
+**~7 giờ và bạn viết code từ ngày đầu tiên.** Đây là tiêu chí chọn domain có chủ đích: bài học nằm ở *hành vi hệ thống dưới tải*, không ở việc gõ dữ liệu — nên dữ liệu phải rẻ.
 
 ---
 
@@ -163,28 +165,40 @@ So với **65–350 giờ** curate nội dung của dự án fitness. Bạn vi�
 |---|---|---|
 | 01 | [Domain Model](docs/01-domain-model.md) | Event storming, bounded context, ubiquitous language |
 | 02 | [Architecture](docs/02-architecture.md) | 5 plane, C4, lý do chọn công nghệ |
-| **03** | [**Segment Inventory Engine**](docs/03-segment-inventory-engine.md) | ⭐ Bitmask, thuật toán chọn chỗ, 2KB insight |
+| **03** | [**Segment Inventory Engine**](docs/03-segment-inventory-engine.md) | ⭐ Bitmask, thuật toán chọn chỗ, insight 4 KB |
 | **04** | [**Contention Strategies**](docs/04-contention-strategies.md) | ⭐ 4 cách, benchmark, cách nào hỏng khi nào |
+| **05** | [**Build Progression**](docs/05-build-progression.md) | ⭐ **Bắt đầu từ đây** — API thường trước, hạ tầng thêm sau theo số đo được |
+
+> **Lần đầu đọc?** Kiến trúc ở [02](docs/02-architecture.md) là **đích đến**, không phải điểm xuất phát.
+> Đọc [**05 — Build Progression**](docs/05-build-progression.md) để biết dựng cái gì trước, cái gì sau,
+> và **điều kiện để được phép thêm mỗi mảnh hạ tầng**.
 
 > Đang xây tiếp: danh mục service · schema DB · API contract · saga & event ·
 > phòng chờ ảo · chống đầu cơ · load test · sprint backlog.
 
 ---
 
-## 7. Bài học chuyển từ dự án fitness
+## 7. Bạn học được gì
 
-Khoảng **70% phần "cách làm"** dùng lại nguyên vẹn:
-
-| Từ bộ tài liệu fitness | Dùng lại |
+| Chủ đề | Học qua việc |
 |---|---|
-| Thứ tự dựng codebase · template copy · 10 bước dựng service | ✅ 100% |
-| Quy ước API (đơn vị, thời gian, RFC 9457, idempotency) | ✅ 100% |
-| Quy ước schema (outbox, processed_event, enum, tiền) | ✅ 100% |
-| Event & saga · migration & rollback · mẫu ADR | ✅ 100% |
-| Chạy local $0 (k3d, ngân sách RAM) | ✅ 100% |
-| Mô hình miền fitness, solver thực đơn | ❌ — giữ lại cho bản ship thật sau này |
+| **Tranh chấp phân tán** | Dựng cả 4 cách giải và tự thấy từng cách gãy ([04](docs/04-contention-strategies.md)) |
+| **Luật khả mở rộng phổ quát** | Tăng từ 1 lên 200 pod và nhìn throughput **tụt xuống** |
+| **Phân vùng thắng nhân bản** | Cùng RPS, 200 chuyến vs 1 chuyến — chênh lệch hai bậc độ lớn |
+| **Nguyên tử không cần khoá** | Redis Lua đơn luồng thay cho khoá phân tán |
+| **Đánh đổi bền vững** | Redis nhanh nhưng mất dữ liệu; thiết kế để mất 1 giây không quan trọng |
+| **Đối soát hai kho dữ liệu** | Cái giá bắt buộc phải trả khi có cache ghi được |
+| **Saga & bồi hoàn** | Giữ chỗ → thanh toán → xuất vé, và mọi nhánh thất bại |
+| **Hẹn giờ phân tán** | 100.000 hold hết hạn, và chiếc bẫy rò rỉ âm thầm ([04 §9](docs/04-contention-strategies.md)) |
+| **Backpressure ở tầng sản phẩm** | Phòng chờ ảo hiệu quả hơn mọi circuit breaker |
+| **Thiết kế chống đối thủ** | Cò vé là tác nhân trong sơ đồ context, không phải mục "bảo mật" phụ |
+| **Bất biến kiểm chứng bằng máy** | 4 truy vấn SQL chạy sau mỗi load test trong CI |
 
-Cái mới hoàn toàn: **tranh chấp, phòng chờ ảo, đối soát hai kho dữ liệu, chống đối thủ có chủ đích**.
+Ba bài học phản trực giác nhất — và vì vậy đáng giá nhất:
+
+1. **Thêm server làm chậm hơn** khi nút thắt là tranh chấp, không phải tài nguyên
+2. **Thuật toán chọn chỗ thông minh hơn làm hệ thống chậm hơn** ([03 §6](docs/03-segment-inventory-engine.md))
+3. **Giảm tranh chấp bằng thiết kế sản phẩm** hiệu quả hơn mọi tối ưu khoá
 
 ---
 
@@ -198,4 +212,4 @@ make loadtest      # k6: 10.000 người tranh 500 chỗ
 make verify        # đếm vé bán ra — phải đúng 500
 ```
 
-`make verify` là thứ khiến dự án này dạy nhanh hơn fitness: **feedback khách quan trong 30 giây**.
+`make verify` chạy 4 truy vấn bất biến ([03 §12](docs/03-segment-inventory-engine.md)). Đỏ một cái là build fail — **một cài đặt nhanh gấp 100 lần nhưng bán thừa 3 vé là sai, không phải "nhanh hơn"**.

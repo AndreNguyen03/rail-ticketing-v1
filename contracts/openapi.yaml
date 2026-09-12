@@ -1,0 +1,582 @@
+openapi: 3.1.0
+
+info:
+  title: Rail Ticketing API
+  version: 0.1.0
+  license:
+    name: MIT
+    identifier: MIT
+  description: |
+    Public contract for the rail ticketing system. This file is the source of
+    truth; implementations must match it (ADR-0004).
+
+    The contract does not change across build stages. Stage 0 serves it from
+    PostgreSQL only; stage 4 moves the inventory write path to Redis; stage 5
+    makes payment asynchronous. Clients see none of that.
+
+    ## Conventions
+
+    * Units are part of the field name: `priceVnd`, `ttlSeconds`, `durationMinutes`.
+    * `*Date` is a calendar date (`2026-02-14`). `*At` is an instant, RFC 3339 UTC.
+    * Errors are RFC 9457 `application/problem+json`.
+    * Every state-changing POST requires an `Idempotency-Key` header. Retry is
+      added at stage 3, and retrying a non-idempotent write is how duplicate
+      tickets get created, so the key exists from day one.
+
+    ## Station indexes
+
+    A trip's stations are numbered `0..n` in travel order. A journey from index
+    `a` to index `b` occupies legs `a..b-1`. Availability and holds are expressed
+    in indexes, not station codes, because indexes map directly onto the leg
+    bitmask that backs inventory (ADR-0005). `/trips` returns the indexes for a
+    search, so a client never has to compute them.
+
+servers:
+  - url: http://localhost:8080
+    description: Local gateway
+
+# Identity is required everywhere except trip search and trip detail, which stay
+# public. Availability is the first endpoint a scalper bot hits, so it sits on
+# the authenticated side from day one — stage 7 caps requests per identity.
+security:
+  - XIdentity: []
+
+tags:
+  - name: schedule
+    description: Trips, stations, carriages, prices. Read-heavy, cold data.
+  - name: inventory
+    description: Segment availability and holds. The contention point.
+  - name: booking
+    description: Orders and tickets.
+
+paths:
+
+  /api/v1/trips:
+    get:
+      tags: [schedule]
+      summary: Search trips
+      operationId: searchTrips
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: fromStationCode
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/StationCode' }
+          example: HN
+        - name: toStationCode
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/StationCode' }
+          example: SG
+        - name: departureDate
+          in: query
+          required: true
+          schema: { type: string, format: date }
+          example: "2026-02-14"
+      responses:
+        '200':
+          description: Matching trips, empty list if none
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trips]
+                properties:
+                  trips:
+                    type: array
+                    items: { $ref: '#/components/schemas/TripSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/trips/{tripId}:
+    get:
+      tags: [schedule]
+      summary: Trip detail with station list and carriage layout
+      operationId: getTrip
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          description: Trip detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TripDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/trips/{tripId}/availability:
+    get:
+      tags: [inventory]
+      summary: Berths free for one specific journey
+      description: |
+        Returns only berths free on every leg between the two indexes. A berth
+        sold for a different, non-overlapping part of the trip is available here.
+      operationId: getAvailability
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/TripId'
+        - name: fromStationIndex
+          in: query
+          required: true
+          schema: { type: integer, minimum: 0, maximum: 28 }
+          example: 0
+        - name: toStationIndex
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 29 }
+          example: 17
+      responses:
+        '200':
+          description: Availability for the requested journey
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Availability' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/holds:
+    post:
+      tags: [inventory]
+      summary: Hold berths for a journey
+      description: |
+        The server picks the berths. Explicit berth selection is an additive
+        change and arrives with the seat map at a later stage.
+
+        A hold expires on its own. That TTL is what makes naive compensation
+        safe at stage 0: an orphaned hold releases itself.
+      operationId: createHold
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateHoldRequest' }
+      responses:
+        '201':
+          description: Berths held
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Hold' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Not enough berths free for this journey
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              example:
+                type: "https://railticketing.vn/problems/insufficient-inventory"
+                title: "Insufficient inventory"
+                status: 409
+                detail: "Requested 2 berths, 0 free for legs 0..16"
+                instance: "/api/v1/holds"
+                traceId: "0af7651916cd43dd8448eb211c80319c"
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/v1/holds/{holdId}:
+    delete:
+      tags: [inventory]
+      summary: Release a hold
+      description: Idempotent. Releasing an expired or unknown hold is not an error.
+      operationId: releaseHold
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: holdId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Released, or already gone
+        '400':
+          description: |
+            `holdId` is not a well-formed UUID. An unknown but well-formed id is
+            not an error — see 204.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /api/v1/bookings:
+    post:
+      tags: [booking]
+      summary: Create an order from a hold
+      operationId: createBooking
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateBookingRequest' }
+      responses:
+        '201':
+          description: Order created, awaiting payment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: The hold has expired or already belongs to an order
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/v1/bookings/{bookingId}/confirm:
+    post:
+      tags: [booking]
+      summary: Pay for an order and issue tickets
+      description: |
+        Synchronous at stage 0 with a mock payment. Stage 5 moves payment behind
+        a saga; the response shape does not change, but `PENDING_PAYMENT` becomes
+        a normal outcome rather than a transient one.
+      operationId: confirmBooking
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/BookingId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfirmBookingRequest' }
+      responses:
+        '200':
+          description: Payment attempted; check `status`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Order is not in a confirmable state
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/v1/bookings/{bookingId}:
+    get:
+      tags: [booking]
+      summary: Order detail
+      operationId: getBooking
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/BookingId'
+      responses:
+        '200':
+          description: Order detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+
+  securitySchemes:
+
+    XIdentity:
+      type: apiKey
+      in: header
+      name: X-Identity
+      description: |
+        The caller's identity. At stage 0 this header is accepted without any
+        verification — it exists so that every endpoint which will need an
+        identity already declares one.
+
+        Stage 8 replaces this scheme with OpenID Connect through Keycloak. The
+        set of operations requiring identity does not change, only how identity
+        is proven, so that migration is not a breaking change for the contract.
+
+  parameters:
+
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: |
+        Propagated through every service and echoed on the response. Generated
+        at the gateway when absent. This is the only way to follow one request
+        across three log streams.
+      schema: { type: string, maxLength: 64 }
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated, unique per logical operation. Replaying the same key
+        returns the original result instead of performing the write again.
+        Keys are retained for 24 hours.
+      schema: { type: string, format: uuid }
+
+    TripId:
+      name: tripId
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+
+    BookingId:
+      name: bookingId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+
+    BadRequest:
+      description: Malformed or inconsistent request
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+    NotFound:
+      description: Resource does not exist
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+    Unavailable:
+      description: A downstream service is unavailable or too slow
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+
+    Problem:
+      description: RFC 9457 problem detail.
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        traceId:
+          type: string
+          description: Same value as the X-Correlation-Id of the request.
+
+    StationCode:
+      type: string
+      pattern: '^[A-Z]{2,5}$'
+      examples: [HN, VINH, HUE, DN, NT, SG]
+
+    BerthClass:
+      type: string
+      enum: [SOFT_SEAT, BERTH_6, BERTH_4]
+
+    BookingStatus:
+      type: string
+      enum: [PENDING_PAYMENT, CONFIRMED, PAYMENT_FAILED, EXPIRED, CANCELLED]
+
+    Station:
+      type: object
+      required: [stationIndex, stationCode, stationName]
+      properties:
+        stationIndex:
+          type: integer
+          minimum: 0
+          description: Position in travel order. Leg i runs from index i to i+1.
+        stationCode: { $ref: '#/components/schemas/StationCode' }
+        stationName: { type: string }
+        arrivesAt: { type: [string, 'null'], format: date-time }
+        departsAt: { type: [string, 'null'], format: date-time }
+
+    TripSummary:
+      type: object
+      required:
+        - tripId
+        - trainCode
+        - departureDate
+        - fromStationIndex
+        - toStationIndex
+        - departsAt
+        - arrivesAt
+        - durationMinutes
+        - minPriceVnd
+      properties:
+        tripId: { type: integer, format: int64 }
+        trainCode: { type: string, examples: [SE1] }
+        departureDate: { type: string, format: date }
+        fromStationIndex:
+          type: integer
+          description: Index of the searched origin on this trip. Pass to /availability.
+        toStationIndex:
+          type: integer
+          description: Index of the searched destination on this trip.
+        departsAt: { type: string, format: date-time }
+        arrivesAt: { type: string, format: date-time }
+        durationMinutes: { type: integer }
+        minPriceVnd: { type: integer, format: int64 }
+
+    TripDetail:
+      type: object
+      required: [tripId, trainCode, departureDate, stations, carriages]
+      properties:
+        tripId: { type: integer, format: int64 }
+        trainCode: { type: string }
+        departureDate: { type: string, format: date }
+        stations:
+          type: array
+          items: { $ref: '#/components/schemas/Station' }
+        carriages:
+          type: array
+          items: { $ref: '#/components/schemas/Carriage' }
+
+    Carriage:
+      type: object
+      required: [carriageNo, berthClass, berths]
+      properties:
+        carriageNo: { type: integer }
+        berthClass: { $ref: '#/components/schemas/BerthClass' }
+        berths:
+          type: array
+          items: { $ref: '#/components/schemas/Berth' }
+
+    Berth:
+      type: object
+      required: [berthId, carriageNo, berthNo, berthClass, priceVnd]
+      properties:
+        berthId: { type: integer }
+        carriageNo: { type: integer }
+        berthNo: { type: integer }
+        berthClass: { $ref: '#/components/schemas/BerthClass' }
+        level:
+          type: [integer, 'null']
+          description: Bunk level, 1 is lowest. Null for a seat.
+        priceVnd: { type: integer, format: int64 }
+
+    Availability:
+      type: object
+      required: [tripId, fromStationIndex, toStationIndex, availableCount, berths]
+      properties:
+        tripId: { type: integer, format: int64 }
+        fromStationIndex: { type: integer }
+        toStationIndex: { type: integer }
+        availableCount: { type: integer }
+        countByClass:
+          type: object
+          additionalProperties: { type: integer }
+          examples:
+            - { SOFT_SEAT: 41, BERTH_6: 12, BERTH_4: 0 }
+        berths:
+          type: array
+          items: { $ref: '#/components/schemas/Berth' }
+
+    CreateHoldRequest:
+      type: object
+      required: [tripId, fromStationIndex, toStationIndex, quantity]
+      properties:
+        tripId: { type: integer, format: int64 }
+        fromStationIndex: { type: integer, minimum: 0 }
+        toStationIndex: { type: integer, minimum: 1 }
+        quantity: { type: integer, minimum: 1, maximum: 4 }
+        preferredClass: { $ref: '#/components/schemas/BerthClass' }
+
+    Hold:
+      type: object
+      required:
+        - holdId
+        - tripId
+        - fromStationIndex
+        - toStationIndex
+        - berths
+        - totalPriceVnd
+        - expiresAt
+        - ttlSeconds
+      properties:
+        holdId: { type: string, format: uuid }
+        tripId: { type: integer, format: int64 }
+        fromStationIndex: { type: integer }
+        toStationIndex: { type: integer }
+        berths:
+          type: array
+          items: { $ref: '#/components/schemas/Berth' }
+        totalPriceVnd: { type: integer, format: int64 }
+        expiresAt: { type: string, format: date-time }
+        ttlSeconds: { type: integer, examples: [900] }
+
+    Passenger:
+      type: object
+      required: [fullName, idNumber, passengerType]
+      properties:
+        fullName: { type: string, maxLength: 100 }
+        idNumber:
+          type: string
+          pattern: '^[0-9]{12}$'
+          description: |
+            National ID (CCCD). Required from day one: anti-scalping at a later
+            stage caps purchases per identity, and adding a required field to a
+            live contract is a breaking change.
+        passengerType:
+          type: string
+          enum: [ADULT, CHILD, SENIOR, STUDENT]
+
+    Contact:
+      type: object
+      required: [fullName, phone]
+      properties:
+        fullName: { type: string, maxLength: 100 }
+        phone: { type: string, pattern: '^0[0-9]{9}$' }
+        email: { type: string, format: email }
+
+    CreateBookingRequest:
+      type: object
+      required: [holdId, contact, passengers]
+      properties:
+        holdId: { type: string, format: uuid }
+        contact: { $ref: '#/components/schemas/Contact' }
+        passengers:
+          type: array
+          minItems: 1
+          maxItems: 4
+          description: Must match the number of berths in the hold.
+          items: { $ref: '#/components/schemas/Passenger' }
+
+    ConfirmBookingRequest:
+      type: object
+      required: [paymentMethod]
+      properties:
+        paymentMethod:
+          type: string
+          enum: [MOCK, VNPAY, MOMO]
+          description: Only MOCK is implemented at stage 0.
+
+    Ticket:
+      type: object
+      required: [ticketId, berthId, passengerName, priceVnd]
+      properties:
+        ticketId: { type: string, format: uuid }
+        berthId: { type: integer }
+        carriageNo: { type: integer }
+        berthNo: { type: integer }
+        passengerName: { type: string }
+        priceVnd: { type: integer, format: int64 }
+
+    Booking:
+      type: object
+      required: [bookingId, status, tripId, totalPriceVnd, createdAt]
+      properties:
+        bookingId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/BookingStatus' }
+        tripId: { type: integer, format: int64 }
+        holdId: { type: [string, 'null'], format: uuid }
+        totalPriceVnd: { type: integer, format: int64 }
+        contact: { $ref: '#/components/schemas/Contact' }
+        passengers:
+          type: array
+          items: { $ref: '#/components/schemas/Passenger' }
+        tickets:
+          type: array
+          description: Present once status is CONFIRMED.
+          items: { $ref: '#/components/schemas/Ticket' }
+        expiresAt:
+          type: [string, 'null']
+          format: date-time
+          description: When the underlying hold expires. Null once confirmed.
+        createdAt: { type: string, format: date-time }

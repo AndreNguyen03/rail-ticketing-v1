@@ -513,10 +513,11 @@ WHERE b.status = 'CONFIRMED'
 
 Bốn truy vấn này chạy sau **mỗi** lần load test, trong CI. Đỏ một cái là build fail.
 
-> Đây là thứ dự án fitness không có. *"Thực đơn này có ngon không"* là chủ quan và phải chờ
-> người dùng thật trả lời. *"Có bán thừa vé không"* trả lời được trong 30 giây, tự động,
-> mỗi lần commit. **Vòng phản hồi ngắn hơn hai bậc độ lớn** — và đó là thứ quyết định
-> tốc độ học.
+> **Tính đúng đắn ở đây là nhị phân, không phải ý kiến.** "Có bán thừa vé không" trả lời được
+> trong 30 giây, tự động, mỗi lần commit — không cần người dùng thật, không cần chờ phản hồi,
+> không cần tranh luận. Đó là lý do bạn dám thay đổi kiến trúc tồn kho bốn lần ở
+> [04 §12](04-contention-strategies.md) mà không sợ: mỗi lần đổi, bốn truy vấn này nói ngay
+> bạn còn đúng hay đã sai.
 
 ---
 

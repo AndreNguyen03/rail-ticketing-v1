@@ -1,0 +1,102 @@
+# Local development fixture (ADR-0008). Kubernetes replaces this at stage 10.
+#
+# No restart policy anywhere on purpose: stages 4 and 11 kill infrastructure
+# deliberately (`docker kill ...`) to observe failure. `unless-stopped` would
+# silently restart the container and destroy the experiment.
+#
+# The four services live behind a `services` profile so that
+# `docker compose up -d postgres` still starts the database alone, which is what
+# you want while developing one service from the IDE.
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: rt-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api-gateway:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: rt-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      SCHEDULE_URL: http://schedule-service:8081
+      INVENTORY_URL: http://inventory-service:8082
+      BOOKING_URL: http://booking-service:8083
+    depends_on:
+      - schedule-service
+      - inventory-service
+      - booking-service
+
+  schedule-service:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/schedule-service/Dockerfile
+    container_name: rt-schedule
+    ports:
+      - "8081:8081"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: schedule_user
+      DB_PASSWORD: schedule_pw
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  inventory-service:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/inventory-service/Dockerfile
+    container_name: rt-inventory
+    ports:
+      - "8082:8082"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: inventory_user
+      DB_PASSWORD: inventory_pw
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  booking-service:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/booking-service/Dockerfile
+    container_name: rt-booking
+    ports:
+      - "8083:8083"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: booking_user
+      DB_PASSWORD: booking_pw
+      INVENTORY_URL: http://inventory-service:8082
+      SCHEDULE_URL: http://schedule-service:8081
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
