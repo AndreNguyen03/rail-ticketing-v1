@@ -7,7 +7,7 @@ spring:
       enabled: true
 
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/bookingdb
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/bookingdb
     username: ${DB_USER:booking_user}
     password: ${DB_PASSWORD:booking_pw}
     hikari:
@@ -25,6 +25,10 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+
+  mvc:
+    problemdetails:
+      enabled: true
 
 server:
   port: ${SERVER_PORT:8083}
