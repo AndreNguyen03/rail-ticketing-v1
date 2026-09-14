@@ -7,6 +7,10 @@
 # The four services live behind a `services` profile so that
 # `docker compose up -d postgres` still starts the database alone, which is what
 # you want while developing one service from the IDE.
+#
+# Observability stack (Jaeger, Prometheus, Grafana) also lives under the
+# `services` profile: tracing and metrics are only meaningful when the full
+# application is running.
 
 services:
 
@@ -28,6 +32,47 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── Observability ──────────────────────────────────────────────────────────
+
+  jaeger:
+    profiles: [services]
+    image: jaegertracing/all-in-one:latest
+    container_name: rt-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI  →  http://localhost:16686
+      - "4318:4318"     # OTLP HTTP  (services push traces here)
+
+  prometheus:
+    profiles: [services]
+    image: prom/prometheus:latest
+    container_name: rt-prometheus
+    ports:
+      - "9090:9090"     # Prometheus UI  →  http://localhost:9090
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - jaeger
+
+  grafana:
+    profiles: [services]
+    image: grafana/grafana:latest
+    container_name: rt-grafana
+    ports:
+      - "3000:3000"     # Grafana UI  →  http://localhost:3000  (admin/admin)
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  # ── Application services ───────────────────────────────────────────────────
+
   api-gateway:
     profiles: [services]
     build:
@@ -40,10 +85,15 @@ services:
       SCHEDULE_URL: http://schedule-service:8081
       INVENTORY_URL: http://inventory-service:8082
       BOOKING_URL: http://booking-service:8083
+      OTEL_SERVICE_NAME: api-gateway
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
     depends_on:
       - schedule-service
       - inventory-service
       - booking-service
+      - jaeger
 
   schedule-service:
     profiles: [services]
@@ -58,9 +108,15 @@ services:
       DB_PORT: "5432"
       DB_USER: schedule_user
       DB_PASSWORD: schedule_pw
+      OTEL_SERVICE_NAME: schedule-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
     depends_on:
       postgres:
         condition: service_healthy
+      jaeger:
+        condition: service_started
 
   inventory-service:
     profiles: [services]
@@ -75,9 +131,15 @@ services:
       DB_PORT: "5432"
       DB_USER: inventory_user
       DB_PASSWORD: inventory_pw
+      OTEL_SERVICE_NAME: inventory-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
     depends_on:
       postgres:
         condition: service_healthy
+      jaeger:
+        condition: service_started
 
   booking-service:
     profiles: [services]
@@ -94,9 +156,16 @@ services:
       DB_PASSWORD: booking_pw
       INVENTORY_URL: http://inventory-service:8082
       SCHEDULE_URL: http://schedule-service:8081
+      OTEL_SERVICE_NAME: booking-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
     depends_on:
       postgres:
         condition: service_healthy
+      jaeger:
+        condition: service_started
 
 volumes:
   pgdata:
+  grafana-data:
