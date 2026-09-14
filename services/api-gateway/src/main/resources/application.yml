@@ -11,11 +11,8 @@ spring:
       server:
         webmvc:
           routes:
-            - id: schedule
-              uri: ${SCHEDULE_URL:http://localhost:8081}
-              predicates:
-                - Path=/api/v1/trips/**
-
+            # Most specific first — /api/v1/trips/*/availability belongs to inventory,
+            # NOT schedule. Must be declared before the broad /api/v1/trips/** route.
             - id: inventory-availability
               uri: ${INVENTORY_URL:http://localhost:8082}
               predicates:
@@ -31,10 +28,11 @@ spring:
               predicates:
                 - Path=/api/v1/bookings/**
 
-# Route order matters: /api/v1/trips/*/availability is owned by inventory, but
-# it sits under the same prefix as schedule's /api/v1/trips/**. The more
-# specific route must win, so keep it declared before the schedule route and
-# verify it with a request, not by reading this comment.
+            # Broad catch-all last — would swallow /trips/*/availability if placed first
+            - id: schedule
+              uri: ${SCHEDULE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/trips/**
 
 server:
   port: ${SERVER_PORT:8080}
