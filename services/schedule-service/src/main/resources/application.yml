@@ -44,12 +44,21 @@ management:
     health:
       show-details: always
   tracing:
+    enabled: true
     sampling:
       probability: 1.0
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://jaeger:4318}/v1/traces
   metrics:
     distribution:
       percentiles-histogram:
         http.server.requests: true
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://jaeger:4318}/v1/traces
 
 logging:
   pattern:
