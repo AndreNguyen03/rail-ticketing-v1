@@ -2,7 +2,6 @@ package vn.railticketing.booking.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import vn.railticketing.booking.client.InventoryClient;
@@ -25,9 +24,6 @@ public class BookingService {
 
     private final InventoryClient inventoryClient;
     private final BookingPersistenceService persistenceService;
-
-    @Value("${booking.payment.mock-success-rate}")
-    private double mockSuccessRate;
 
     public BookingService(InventoryClient inventoryClient,
                           BookingPersistenceService persistenceService) {
@@ -76,24 +72,11 @@ public class BookingService {
             throw new BookingNotConfirmableException(bookingId, booking.getStatus());
         }
 
-        boolean success = Math.random() < mockSuccessRate;
-        UUID holdId = booking.getHoldId();
-
-        if (success) {
-            Booking confirmed = persistenceService.markConfirmed(bookingId);
-            // Promote hold to permanent — if this fails, TTL cleans up the stale hold
-            if (holdId != null) {
-                try { inventoryClient.commitHold(holdId); }
-                catch (RestClientException e) {
-                    log.warn("confirmBooking: could not commit hold {} — TTL will clean up. {}", holdId, e.getMessage());
-                }
-            }
-            return toResponse(confirmed);
-        } else {
-            Booking failed = persistenceService.markPaymentFailed(bookingId);
-            if (holdId != null) tryReleaseHold(holdId);
-            return toResponse(failed);
-        }
+        // Stage 5 async: publish BookingPaymentRequested via outbox, return PENDING
+        // PaymentProcessor (via Kafka) will decide success/fail and drive saga via payment.results
+        persistenceService.requestPayment(bookingId);
+        log.info("confirmBooking async requested for {} (outbox)", bookingId);
+        return toResponse(booking);
     }
 
     public BookingResponse getBooking(UUID bookingId) {
