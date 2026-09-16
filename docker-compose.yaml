@@ -32,6 +32,80 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    profiles: [services]
+    image: redis:7-alpine
+    container_name: rt-redis
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    profiles: [services]
+    image: apache/kafka:3.7.0
+    container_name: rt-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qg
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Dev tools ─────────────────────────────────────────────────────────────
+
+  swagger-ui:
+    profiles: [services]
+    image: swaggerapi/swagger-ui:latest
+    container_name: rt-swagger
+    ports:
+      - "8088:8080"   # Swagger UI → http://localhost:8088
+    environment:
+      SWAGGER_JSON: /openapi/openapi.yaml
+      BASE_URL: /
+    volumes:
+      - ./contracts:/openapi:ro
+
+
+
+  redisinsight:
+    profiles: [services]
+    image: redis/redisinsight:latest
+    container_name: rt-redisinsight
+    ports:
+      - "5540:5540"   # RedisInsight UI → http://localhost:5540
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  kafka-ui:
+    profiles: [services]
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: rt-kafka-ui
+    ports:
+      - "8090:8080"   # Kafka UI → http://localhost:8090
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   # ── Observability ──────────────────────────────────────────────────────────
 
   jaeger:
@@ -116,6 +190,12 @@ services:
       OTEL_TRACES_SAMPLER: always_on
       OTEL_METRICS_EXPORTER: none
       OTEL_LOGS_EXPORTER: none
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -127,15 +207,21 @@ services:
     build:
       context: .
       dockerfile: services/inventory-service/Dockerfile
-    container_name: rt-inventory
-    ports:
-      - "8082:8082"
+    expose:
+      - "8082"
+    # container_name and host port removed to allow `docker compose --scale inventory-service=N`
+    # (fixed name + fixed 8082:8082 blocks scaling). Gateway reaches it via
+    # http://inventory-service:8082 over the internal network. For host debug:
+    # docker compose run --publish 8082:8082 inventory-service
     environment:
       DB_HOST: postgres
       DB_PORT: "5432"
       DB_USER: inventory_user
       DB_PASSWORD: inventory_pw
       SCHEDULE_URL: http://schedule-service:8081
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      INVENTORY_REDIS_ENABLED: "true"
       OTEL_SERVICE_NAME: inventory-service
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
@@ -144,6 +230,10 @@ services:
       OTEL_LOGS_EXPORTER: none
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      schedule-service:
         condition: service_healthy
       jaeger:
         condition: service_started
@@ -163,6 +253,7 @@ services:
       DB_PASSWORD: booking_pw
       INVENTORY_URL: http://inventory-service:8082
       SCHEDULE_URL: http://schedule-service:8081
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       OTEL_SERVICE_NAME: booking-service
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
@@ -171,6 +262,30 @@ services:
       OTEL_LOGS_EXPORTER: none
     depends_on:
       postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+  payment-service:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    container_name: rt-payment
+    ports:
+      - "8084:8084"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OTEL_SERVICE_NAME: payment-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    depends_on:
+      kafka:
         condition: service_healthy
       jaeger:
         condition: service_started
