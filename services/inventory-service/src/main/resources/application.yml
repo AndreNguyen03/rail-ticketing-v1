@@ -67,6 +67,17 @@ management:
 clients:
   schedule:
     base-url: ${SCHEDULE_URL:http://localhost:8081}
+    connect-timeout-ms: 500
+    read-timeout-ms: 1000
+
+spring.data.redis.host: ${REDIS_HOST:localhost}
+spring.data.redis.port: ${REDIS_PORT:6379}
+spring.data.redis.timeout: 500ms
+spring.data.redis.lettuce.pool.max-active: 20
+spring.datasource.hikari.connection-timeout: 500
+server.tomcat.connection-timeout: 2000
+
+inventory.redis.enabled: ${INVENTORY_REDIS_ENABLED:false}
 
 inventory:
   hold:

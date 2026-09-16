@@ -16,7 +16,9 @@ import vn.railticketing.inventory.web.dto.BerthDto;
 import vn.railticketing.inventory.web.dto.CreateHoldRequest;
 import vn.railticketing.inventory.web.dto.HoldResponse;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 
@@ -27,14 +29,18 @@ public class HoldService {
 
     private final HoldRepository holdRepository;
     private final BerthInventoryRepository berthInventoryRepository;
+    private final RedisInventoryService redisInventoryService;
 
     @Value("${inventory.hold.ttl-seconds}")
     private long ttlSeconds;
 
     public HoldService(HoldRepository holdRepository,
-                       BerthInventoryRepository berthInventoryRepository) {
+                       BerthInventoryRepository berthInventoryRepository,
+                       @Autowired(required = false)
+                       RedisInventoryService redisInventoryService) {
         this.holdRepository = holdRepository;
         this.berthInventoryRepository = berthInventoryRepository;
+        this.redisInventoryService = redisInventoryService;
     }
 
     @Transactional(
@@ -63,6 +69,29 @@ public class HoldService {
 
     private HoldResponse doCreateHold(CreateHoldRequest request, UUID idempotencyKey) {
         int journeyMask = computeJourneyMask(request.fromStationIndex(), request.toStationIndex());
+
+        // Stage 4: try Redis Lua first (atomic, ~25k/s). Fallback to DB FOR UPDATE SKIP LOCKED.
+        if (redisInventoryService != null && redisInventoryService.isEnabled()) {
+            var r = redisInventoryService.tryHold(request.tripId(), request.preferredClass(), journeyMask,
+                    request.quantity(), idempotencyKey.toString(), ttlSeconds);
+            if (r != null && r.held()) {
+                // Redis reserved berths — mirror to DB as source of truth (best-effort)
+                List<Long> ids = Arrays.stream(r.berthIdsCsv().split(","))
+                        .map(Long::valueOf).toList();
+                List<BerthInventory> berths = berthInventoryRepository.findAllByBerthIdIn(ids);
+                for (BerthInventory b : berths) b.setHeldMask(b.getHeldMask() | journeyMask);
+                Instant expiresAt = Instant.now().plusSeconds(ttlSeconds);
+                Hold hold = Hold.create(request.tripId(), (short) request.fromStationIndex(),
+                        (short) request.toStationIndex(), journeyMask, expiresAt, idempotencyKey);
+                for (Long id : ids) hold.getHoldBerths().add(new HoldBerth(hold, id));
+                holdRepository.save(hold);
+                return toResponse(hold, berths, expiresAt);
+            }
+            if (r != null && "NO_BERTH_AVAILABLE".equals(r.status())) {
+                throw new InsufficientInventoryException(request.quantity(), 0);
+            }
+            // r == null -> Redis down, fallback to DB
+        }
 
         // Lock berths atomically. FOR UPDATE SKIP LOCKED ensures competing requests
         // pick different berths instead of queuing behind each other.
@@ -104,6 +133,9 @@ public class HoldService {
     )
     public void releaseHold(UUID holdId) {
         holdRepository.findByIdWithBerths(holdId).ifPresent(hold -> {
+            if (redisInventoryService != null && redisInventoryService.isEnabled()) {
+                redisInventoryService.tryRelease(hold.getTripId(), null, holdId.toString(), hold.getJourneyMask());
+            }
             clearHeldBits(hold);
             holdRepository.delete(hold);
         });

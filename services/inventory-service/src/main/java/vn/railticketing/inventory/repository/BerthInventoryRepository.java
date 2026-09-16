@@ -45,4 +45,10 @@ public interface BerthInventoryRepository extends JpaRepository<BerthInventory, 
     );
 
     List<BerthInventory> findAllByBerthIdIn(List<Long> berthIds);
+
+    @Query("SELECT b FROM BerthInventory b WHERE b.tripId = :tripId AND b.berthClass = :berthClass")
+    List<BerthInventory> findByTripIdAndBerthClass(
+            @Param("tripId") Long tripId,
+            @Param("berthClass") String berthClass
+    );
 }

@@ -7,8 +7,9 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClientException;
 import vn.railticketing.inventory.client.ScheduleClient;
 import vn.railticketing.inventory.client.dto.ScheduleTripSummary;
-import vn.railticketing.inventory.client.dto.TripsResponse;
 
+import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 
 @Component
@@ -25,31 +26,41 @@ public class DataSeeder implements CommandLineRunner {
         this.seedService = seedService;
     }
 
+    // Stage-2 Experiment C: seed 49 SE1 days (2026-02-14 .. 2026-04-03) so the
+    // multi-trip k6 scenario has enough independent contention domains to measure.
+    private static final LocalDate SE1_START = LocalDate.of(2026, 2, 14);
+    private static final int       SE1_DAYS  = 49;
+
     @Override
     public void run(String... args) {
-        List<Long> tripIds;
+        List<Long> tripIds = new ArrayList<>();
+
+        // SE1 HN→SG: 49 consecutive days seeded by V2__more_trips.sql
+        for (int d = 0; d < SE1_DAYS; d++) {
+            String date = SE1_START.plusDays(d).toString();
+            try {
+                scheduleClient.searchTrips("HN", "SG", date).trips()
+                        .stream().map(ScheduleTripSummary::tripId).forEach(tripIds::add);
+            } catch (RestClientException e) {
+                log.warn("DataSeeder: could not fetch HN→SG trips for {} — {}", date, e.getMessage());
+            }
+        }
+
+        // SE2 SG→HN: base date only
         try {
-            // Stage 0 has SE1 (HN→SG) and SE2 (SG→HN) on 2026-02-14.
-            // Querying both directions to discover all trip IDs.
-            TripsResponse hnSg = scheduleClient.searchTrips("HN", "SG", "2026-02-14");
-            TripsResponse sgHn = scheduleClient.searchTrips("SG", "HN", "2026-02-14");
-            tripIds = java.util.stream.Stream
-                    .concat(hnSg.trips().stream(), sgHn.trips().stream())
-                    .map(ScheduleTripSummary::tripId)
-                    .distinct()
-                    .toList();
+            scheduleClient.searchTrips("SG", "HN", "2026-02-14").trips()
+                    .stream().map(ScheduleTripSummary::tripId).forEach(tripIds::add);
         } catch (RestClientException e) {
-            log.warn("DataSeeder: schedule-service unavailable — berth_inventory not seeded. " +
-                     "Restart after schedule-service is up. Reason: {}", e.getMessage());
+            log.warn("DataSeeder: could not fetch SG→HN trips — {}", e.getMessage());
+        }
+
+        List<Long> distinct = tripIds.stream().distinct().toList();
+        if (distinct.isEmpty()) {
+            log.warn("DataSeeder: no trips found in schedule-service — berth_inventory not seeded");
             return;
         }
 
-        if (tripIds.isEmpty()) {
-            log.warn("DataSeeder: no trips found in schedule-service");
-            return;
-        }
-
-        for (Long tripId : tripIds) {
+        for (Long tripId : distinct) {
             // Goes through Spring proxy → @Transactional on seedService.seedTrip() is honoured
             seedService.seedTrip(tripId);
         }
