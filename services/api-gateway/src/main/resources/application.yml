@@ -38,6 +38,10 @@ server:
   port: ${SERVER_PORT:8080}
   error:
     include-message: never
+  tomcat:
+    connection-timeout: 8000
+    threads:
+      max: 200
 
 management:
   endpoints:

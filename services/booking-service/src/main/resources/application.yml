@@ -73,11 +73,24 @@ logging:
 clients:
   inventory:
     base-url: ${INVENTORY_URL:http://localhost:8082}
+    connect-timeout-ms: 500
+    read-timeout-ms: 2000
   schedule:
     base-url: ${SCHEDULE_URL:http://localhost:8081}
+    connect-timeout-ms: 500
+    read-timeout-ms: 1000
+
+# Stage 3: timeouts decreasing inward (gateway 8s > booking 5s > inventory 2s > DB 500ms)
+spring.datasource.hikari.connection-timeout: 500
+server.tomcat.connection-timeout: 5000
+
+spring.kafka.bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+spring.kafka.producer.value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
 
 booking:
   payment:
     # Stage 0 payment is a coin flip inside this service. payment-service
     # becomes real at stage 5, when it has a third party to wait for.
     mock-success-rate: 0.9
+  expiry:
+    sweep-interval-ms: 30000   # Stage 5: sweep PENDING_PAYMENT bookings past expiresAt every 30s

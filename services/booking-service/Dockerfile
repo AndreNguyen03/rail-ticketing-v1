@@ -18,6 +18,7 @@ COPY services/api-gateway/pom.xml services/api-gateway/
 COPY services/schedule-service/pom.xml services/schedule-service/
 COPY services/inventory-service/pom.xml services/inventory-service/
 COPY services/booking-service/pom.xml services/booking-service/
+COPY services/payment-service/pom.xml services/payment-service/
 RUN mvn -B -pl services/booking-service -am dependency:go-offline
 
 COPY services/booking-service/src services/booking-service/src
