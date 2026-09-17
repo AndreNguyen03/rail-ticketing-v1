@@ -37,8 +37,7 @@ public class CorrelationIdFilter implements Filter {
         MDC.put(MDC_KEY, correlationId);
         httpRes.setHeader(HEADER, correlationId);
 
-        // Wrap the request so the gateway forwards X-Correlation-Id downstream.
-        // HttpServletRequest headers are immutable — wrapping is the only way to inject one.
+        // Wrap request to forward header: servlet headers immutable, wrapping is the only inject path.
         HttpServletRequestWrapper wrapped = getHttpServletRequestWrapper(correlationId, httpReq);
 
         try {

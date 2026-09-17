@@ -491,3 +491,366 @@ docker exec rt-postgres psql "postgresql://inventory_user:inventory_pw@localhost
 docker exec rt-postgres psql "postgresql://booking_user:booking_pw@localhost:5432/bookingdb" \
   -t -A -c "SELECT status, count(*) FROM booking GROUP BY status;"
 ```
+
+## 10. Stage 6 — Virtual waiting room (Go) scaffold (2026-09-17)
+
+> Entry: front-door collapse dưới spike đã đo nhiều lần (§3, §7's Kafka note, §8) —
+> điều kiện vào Stage 6 theo `docs/05 §9` đã thoả. Thiết kế bám đúng
+> `docs/02-architecture.md`: không DB (chỉ Redis sorted set), không biết gì về
+> vé/booking (chỉ phát admission token), release rate là lever backpressure.
+
+### Thay đổi
+
+| File | Đổi |
+|---|---|
+| `services/waiting-room/go.mod` | module Go mới, `go 1.27.0`, dependency `redis/go-redis/v9` + `google/uuid` |
+| `services/waiting-room/internal/entity/ticket.go` | `Ticket{ID, Resource, Status, Position}` — domain thuần, không biết Redis |
+| `services/waiting-room/internal/repository/queue_repository.go` + `redis_queue_repository.go` | interface `QueueRepository` (port) + implement bằng Redis: sorted set `queue:{resource}` (ZADD NX/ZRANK/ZPOPMIN giữ đúng thứ tự vào-trước-ra-trước), key `admitted:{ticketID}` có TTL 15p làm token, set `active-queues` để release loop biết resource nào đang có người chờ (không hardcode) |
+| `services/waiting-room/internal/service/queue_service.go` | `Join`, `Status`, `ReleaseNext`, `ActiveResources`, `Verify` |
+| `services/waiting-room/internal/handler/queue_handler.go` | `POST /queue/{resource}/join`, `GET /queue/{resource}/tickets/{ticketId}`, `GET /queue/{resource}/length`, `GET /tickets/{ticketId}/verify` (endpoint duy nhất service khác cần gọi) |
+| `services/waiting-room/internal/config/config.go` | env: `SERVER_PORT`, `REDIS_HOST/PORT`, `RELEASE_RATE`, `RELEASE_INTERVAL_MS` |
+| `services/waiting-room/cmd/api/main.go` | wire tay (không DI container) + goroutine `releaseLoop` chạy nền theo `time.Ticker`, quét `ActiveResources()` mỗi tick |
+| `services/waiting-room/Dockerfile` | multi-stage `golang:1.27-alpine` build → `alpine:3.20` runtime, `CGO_ENABLED=0` |
+| `docker-compose.yaml` | thêm service `waiting-room` (port 8085, `depends_on redis healthy`) + `WAITING_ROOM_URL` cho `api-gateway` |
+| `services/waiting-room/internal/repository/{queue_repository,redis_queue_repository}.go` | thêm `SubscribeAdmission` (Redis Pub/Sub `admission-notify:{ticketID}`) — `Release` publish sau khi SET admitted key |
+| `services/waiting-room/internal/service/queue_service.go` | thêm `AwaitAdmission(ctx, ticketID, timeout)` — check trước (race), subscribe, `select` giữa message/ctx.Done |
+| `services/waiting-room/internal/handler/queue_handler.go` | thêm `GET /tickets/{ticketId}/stream` (SSE) — `http.Flusher`, loop `AwaitAdmission` theo chu kỳ heartbeat 15s, phân biệt timeout-chu-kỳ (lặp lại) vs client disconnect thật (`ctx.Err()`, dừng hẳn) |
+| `services/api-gateway/src/main/java/.../client/WaitingRoomClient.java` + `dto/VerifyResponse.java` | `@GetExchange("/tickets/{ticketId}/verify")`, theo đúng pattern `InventoryClient` bên booking-service |
+| `services/api-gateway/src/main/java/.../config/HttpClientConfig.java` | bean `WaitingRoomClient`, timeout connect/read 300ms cố ý ngắn (hot path, không được kéo cả gateway khi waiting-room chậm) |
+| `services/api-gateway/src/main/java/.../filter/QueueAdmissionFilter.java` | servlet `Filter`, `@Order(2)` (sau `CorrelationIdFilter`) — chặn `/api/v1/holds` + `/api/v1/bookings` nếu thiếu `X-Queue-Ticket` hoặc chưa admitted (429), **fail-open** khi waiting-room lỗi/timeout |
+| `services/api-gateway/pom.xml` | thêm `spring-boot-starter-restclient` |
+| `services/api-gateway/src/main/resources/application.yml` | `clients.waiting-room.*`, `queue.enforcement.enabled` (mặc định `false`) + `protected-prefixes` |
+
+### 2 bug thật bắt được khi verify (không phải đoán)
+
+1. **Route conflict thật ở `net/http` ServeMux**: đăng ký cả `GET /queue/{resource}/tickets/{ticketId}` và `GET /queue/tickets/{ticketId}/verify` → **panic lúc start** —
+   `{resource}` là wildcard nên khớp được cả chữ "tickets" literal, path
+   `/queue/tickets/tickets/verify` mơ hồ giữa 2 pattern, Go từ chối đăng ký
+   (không phải warning, panic thật). Fix: tách hẳn `verify` ra prefix
+   `/tickets/{ticketId}/verify` (top-level, không chung `/queue/`).
+2. **Docker base image version**: `golang:1.23-alpine` build lỗi
+   `go.mod requires go >= 1.27.0 (running go 1.23.12)` — máy dev có Go 1.27.0
+   nên `go.mod` tự ghi `go 1.27.0`, phải đổi base image đúng
+   `golang:1.27-alpine`.
+
+### Verify 2026-09-17 (Redis thật, container thật, không giả lập)
+
+```bash
+docker compose up -d redis
+docker compose --profile services up -d --build waiting-room
+curl -X POST http://localhost:8085/queue/trip-A/join   # -> WAITING, Position 0
+curl -X POST http://localhost:8085/queue/trip-B/join   # -> 2 resource độc lập cùng lúc
+curl http://localhost:8085/tickets/{id}/verify         # -> {"admitted":false} trước release
+# đợi 1 chu kỳ release (RELEASE_INTERVAL_MS)
+curl http://localhost:8085/tickets/{id}/verify         # -> {"admitted":true}
+docker exec rt-redis redis-cli ZCARD "queue:{demo-trip}"      # 0 sau khi release hết
+docker exec rt-redis redis-cli TTL "admitted:{id}"            # ~900s (15 phút)
+```
+
+Kết quả: 5 ticket join, release đúng theo rate cấu hình (log `released 2
+ticket(s)`, `released 1 ticket(s)` khớp 2/2/1=5), `trip-A` và `trip-B` được
+release **độc lập cùng lúc trong 1 tick** (chứng minh dynamic resource
+tracking hoạt động, không còn hardcode 1 resource). Chạy được cả bằng
+`go run ./cmd/api` (local, infra-only theo đúng thói quen đã thống nhất) lẫn
+`docker compose --profile services up --build` (full container, network
+DNS `redis:6379` giữa các service).
+
+### Checklist Stage 6 (scaffold)
+
+- [x] Module Go + cấu trúc package (Cách 3: flat, `entity/repository/service/handler/config`)
+- [x] Redis sorted set giữ đúng thứ tự vào-trước-ra-trước, không DB khác
+- [x] Release rate cấu hình qua env, chạy nền bằng goroutine + `time.Ticker`
+- [x] Nhiều resource (nhiều trip) được release độc lập, không hardcode
+- [x] Endpoint `verify` cho service khác (api-gateway/booking-service) kiểm tra token
+- [x] Dockerfile build thật + tích hợp `docker-compose.yaml`, chạy được trong network compose thật
+- [x] SSE (`GET /tickets/{id}/stream`) — giữ 1 HTTP connection mở, push `event: admitted` qua Redis Pub/Sub khi được release, heartbeat mỗi 15s giữ connection sống + phát hiện client disconnect. Không còn REST polling
+- [x] api-gateway gọi `verify` thật qua `QueueAdmissionFilter` — chặn `/api/v1/holds` + `/api/v1/bookings` nếu thiếu header `X-Queue-Ticket` hoặc chưa admitted, cờ `QUEUE_ENFORCEMENT_ENABLED` (mặc định `false`, giống `INVENTORY_REDIS_ENABLED`)
+- [x] Fail-open khi waiting-room chết/timeout (300ms) — verify bằng cách kill waiting-room thật, request vẫn qua (log WARN thay vì chặn cả gateway)
+- [ ] `RELEASE_RATE` hiện là **per-resource** (mỗi resource được rate riêng) — chưa phải rate TOÀN HỆ THỐNG như mô tả "release 2,000/s" ở docs/02. Nếu nhiều trip hot cùng lúc, tổng throughput = rate × số resource active, không bị chặn trần toàn cục. Cần quyết định: chia sẻ 1 ngân sách rate chung (round-robin/weighted) hay chấp nhận per-resource là đủ (mỗi trip vốn đã là 1 miền contention riêng theo đúng bài học Partition ở §8)
+- [ ] Chưa có test tự động (`go test`), chỉ verify tay qua curl/redis-cli
+- [ ] `QueueAdmissionFilter` chưa consume token (1 ticket verify được nhiều lần tới khi TTL 15p hết) — cân nhắc: 1 lần dùng là hết (an toàn hơn, tránh share token) hay giữ nhiều lần (đơn giản hơn, cho phép retry request)
+
+### Verify SSE + gateway integration (2026-09-17, tiếp)
+
+**Bug thật bắt được khi test — không phải môi trường sạch từ đầu**: `go run`
+spawn ra 1 process con biên dịch riêng (từ `go-build` cache, tên `api.exe`),
+**không bị kill theo process cha `go.exe`** — `Stop-Process` lọc theo tên
+`go.exe` tưởng đã dọn sạch nhưng port vẫn bị giữ bởi process con. Phải tìm
+đúng PID qua `netstat -ano | grep LISTENING` rồi kill trực tiếp.
+
+**Bug thứ 2 (không phải bug, là hiểu nhầm timing)**: test lần đầu với
+`RELEASE_INTERVAL_MS=5000` thấy ticket "chưa admitted" vẫn đi qua được —
+tưởng filter sai. Thực ra ticker chạy theo lịch **cố định từ lúc server
+start**, không phải từ lúc resource có người join — join đúng lúc gần 1 tick
+kế tiếp thì bị release gần như ngay. Dùng `RELEASE_INTERVAL_MS=60000` để loại
+trừ khả năng trùng tick khi test mới thấy rõ hành vi thật.
+
+```bash
+# Case 1: không có ticket
+curl -X POST http://localhost:8080/api/v1/holds -d '{...}'          # -> 429 "missing X-Queue-Ticket header"
+# Case 2: có ticket, chưa admitted
+curl -H "X-Queue-Ticket: $TICKET" ... /api/v1/holds                  # -> 429 "ticket not admitted yet"
+# Case 3: admitted (giả lập release qua SET admitted:<id> trực tiếp)
+docker exec rt-redis redis-cli SET "admitted:$TICKET" trip EX 900
+curl -H "X-Queue-Ticket: $TICKET" ... /api/v1/holds                  # -> 201, đi qua hết gateway->inventory thật
+# Case 4: waiting-room chết
+# (kill process) -> vẫn 201, log WARN "fail-open" kèm correlation-id để trace
+```
+
+Kết quả: cả 4 case đúng như thiết kế, chạy qua **toàn bộ stack thật**
+(gateway → inventory-service), không phải mock.
+
+## 11. Stage 6 — Load test chứng minh front-door không sập (2026-09-17)
+
+> Entry: mọi baseline trước (§3, §7, §8) đều ghi nhận "front-door sập ~5s đầu"
+> dưới spike 1000 VU — đây là lý do vào Stage 6. Giờ waiting-room+gateway đã
+> build xong, đo lại đúng kịch bản đó xem có thật sự sửa được không, đúng
+> tinh thần "đo, đừng đoán" xuyên suốt project.
+
+### Thay đổi
+
+| File | Đổi |
+|---|---|
+| `loadtest/k6/stage6-waiting-room.js` | script mới: join hàng đợi → poll `/verify` tới khi admitted (k6 không có client SSE) → mới gọi `/api/v1/holds` kèm `X-Queue-Ticket` |
+| `docker-compose.yaml` | `api-gateway` thêm `QUEUE_ENFORCEMENT_ENABLED: "true"` (compose bật để test, giống pattern `INVENTORY_REDIS_ENABLED`); `waiting-room` đổi `RELEASE_RATE=50`/`RELEASE_INTERVAL_MS=500` (100 admit/s — nằm dưới xa `server.tomcat.threads.max=200` của gateway) |
+
+### Verify — build + chạy full container thật (không phải `java -jar` local, để so sánh công bằng với baseline gốc đo cùng cách)
+
+```bash
+docker compose --profile services up -d --build
+docker run --rm -v "${PWD}/loadtest/k6:/scripts" grafana/k6 run \
+  -e WAITING_ROOM_URL=http://host.docker.internal:8085 \
+  -e GATEWAY_URL=http://host.docker.internal:8080 \
+  -e VUS=1000 -e DURATION=60s -e MAX_POLL_ATTEMPTS=90 /scripts/stage6-waiting-room.js
+```
+
+### Kết quả
+
+| Metric | Baseline gốc (§3, không qua waiting-room) | Stage 6 (qua waiting-room) |
+|---|---|---|
+| Front-door lúc spike | ~5s đầu `connection refused` | **Không có** — `queue_join p99 = 270ms` |
+| `server_errors` | không track riêng, nhưng pool bão hòa/pending 500-1000 | **0.40%** (27/6665), dưới ngưỡng 5% |
+| Latency chạm backend | p99 4.95-5.06s (§2) | `http_req_duration` avg **9.68ms**, p95 **29.59ms** |
+| Cách 1000 VU tới backend | tất cả cùng lúc (nguyên nhân sập) | rải đều theo `RELEASE_RATE` — `queue_wait_ms` avg 7.98s, p95 10.16s (đúng thiết kế: xếp hàng rồi mới thả, không phải tới cùng lúc) |
+| Đúng đắn dữ liệu | verify GREEN mọi lần | verify GREEN: INV-1 `0`, `held_mask<>0` đúng 506/506 (hết vé), `occupied`/`booking` = 0 (test chỉ tới bước hold, không gọi booking — đúng thiết kế script) |
+
+**Kết luận: waiting-room giải quyết đúng vấn đề đưa dự án vào Stage 6.**
+Front-door không còn "connection refused" dưới spike 1000 VU — 1000 connection
+được giữ ở hàng đợi (SSE/poll), backend chỉ thấy đúng `RELEASE_RATE` request/s
+đều đặn thay vì cả 1000 cùng lúc. Không oversell, không mất đúng đắn dữ liệu.
+
+### Checklist
+
+- [x] Load test 1000 VU qua đúng luồng thật (join → verify → hold), không mock
+- [x] So sánh trực tiếp với baseline gốc cùng điều kiện (1000 VU, container thật, cùng trip)
+- [x] `verify.sh`/invariant check GREEN sau load test
+- [x] `QUEUE_ENFORCEMENT_ENABLED=true` là default trong `docker-compose.yaml` (đã proven, giống `INVENTORY_REDIS_ENABLED` sau Stage 4) — Spring app-level default vẫn `false`
+
+## 12. Stage 6 — Observability cho waiting-room (2026-09-17)
+
+> Nhận xét đúng: waiting-room không có tracing/metrics/log có cấu trúc trong
+> khi mọi service Java đều có (OTel → Jaeger, Prometheus qua Micrometer,
+> correlation-id qua MDC). Làm đủ 3 trụ cột, nối chung hạ tầng sẵn có
+> (không dựng Jaeger/Prometheus riêng cho Go).
+
+### Thay đổi
+
+| File | Đổi |
+|---|---|
+| `services/waiting-room/internal/observability/logger.go` | `slog.NewJSONHandler` — JSON structured log, field `service` |
+| `services/waiting-room/internal/observability/metrics.go` | `prometheus.Registry` riêng (không dùng global registry) — `http_requests_total`, `http_request_duration_seconds`, `queue_length{resource}`, `active_resources`, `admitted_total{resource}`, `join_total` |
+| `services/waiting-room/internal/observability/tracing.go` | `otlptracehttp` exporter nối `OTEL_EXPORTER_OTLP_ENDPOINT` — **cùng Jaeger** các service Java đang dùng, cùng tên biến môi trường |
+| `services/waiting-room/internal/observability/middleware.go` | đọc/echo/log `X-Correlation-Id`, gắn `traceId`/`spanId` vào log JSON từ span context (otelhttp tạo trước), `normalizePath()` gộp path động (`/tickets/{uuid}/verify` → `/tickets/{id}/verify`) làm label Prometheus — **tránh cardinality nổ theo ticketID thật** |
+| `services/waiting-room/cmd/api/main.go` | wire logger/metrics/tracer, `otelhttp.NewHandler` bọc ngoài cùng (đọc `traceparent` do gateway forward sẵn), endpoint `/actuator/prometheus`, `releaseLoop` cập nhật gauge `queue_length`/`active_resources` + counter `admitted_total` mỗi tick |
+| `services/waiting-room/internal/handler/queue_handler.go` | `join` tăng `JoinTotal` |
+| `infra/prometheus/prometheus.yml` | thêm scrape target `waiting-room:8085`, path `/actuator/prometheus` khớp convention |
+| `docker-compose.yaml` | `waiting-room` thêm `OTEL_SERVICE_NAME`/`OTEL_EXPORTER_OTLP_ENDPOINT`, `depends_on jaeger` |
+
+Dependency mới: `prometheus/client_golang`, `go.opentelemetry.io/otel` +
+`otlptracehttp` + `sdk` + `contrib/instrumentation/net/http/otelhttp`.
+
+### Verify (Redis + Jaeger thật, không mock)
+
+```bash
+docker compose up -d redis jaeger
+# (chạy waiting-room qua PowerShell Start-Process -RedirectStandardOutput —
+#  nohup+bash background trên Windows không capture được stdout của process
+#  con go-build spawn ra, xem ghi chú §10; PowerShell redirect thì được)
+curl -X POST -H "X-Correlation-Id: test-corr-123" http://localhost:8085/queue/obs-test/join
+curl http://localhost:8085/actuator/prometheus | grep waitingroom
+curl http://localhost:16686/api/services   # -> ["waiting-room"]
+curl "http://localhost:16686/api/traces?service=waiting-room&limit=5"
+```
+
+Kết quả:
+- Log JSON có đủ `correlationId` (echo đúng giá trị gửi lên), `traceId`, `spanId` — VD:
+  `{"correlationId":"ps-test-456","method":"POST","path":"/queue/{resource}/join","status":201,"traceId":"541f48c6df03f4d94291047eb908a932",...}`
+- `/actuator/prometheus` trả đúng series `waitingroom_http_requests_total`, `_duration_seconds`, `_join_total` — path label là `/queue/{resource}/join` (đã normalize), không phải path thô
+- Jaeger API xác nhận `waiting-room` là 1 service thật, span `POST /queue/{resource}/join`/`GET /actuator/health` có mặt với duration thật (không phải log giả)
+- Docker build lại sạch với dependency mới (`prometheus/client_golang`, `otel/*`)
+
+### Checklist
+
+- [x] Structured logging (JSON) với correlation-id đọc/echo/log
+- [x] Prometheus metrics — path label đã normalize, không cardinality nổ theo ticketID
+- [x] OTel tracing nối chung Jaeger sẵn có, verify bằng Jaeger API thật
+- [x] Scrape config Prometheus + docker-compose env đã cập nhật
+- [x] Trace cha-con thật giữa api-gateway (Java) và waiting-room (Go) — xác nhận qua Jaeger API, xem §13
+
+## 13. Stage 6 — Verify trace cha-con xuyên Java <-> Go (2026-09-17)
+
+> Đúng gap đã tự nêu ở cuối §12: mới verify từng service phát span đúng
+> riêng lẻ, chưa test 1 request thật xuyên cả gateway (Java) lẫn
+> waiting-room (Go) có link cha-con đúng trong Jaeger không.
+
+### Verify
+
+```bash
+docker compose --profile services up -d --build
+# join queue thật, admit thủ công qua redis-cli (bỏ qua chờ release loop),
+# rồi gọi /api/v1/holds THẬT qua gateway kèm X-Queue-Ticket — trigger đúng
+# QueueAdmissionFilter -> RestClient -> waiting-room /verify
+curl -X POST http://localhost:8085/queue/trace-test/join
+docker exec rt-redis redis-cli SET admitted:TICKET_ID trace-test EX 900
+curl -H "X-Queue-Ticket: TICKET_ID" -X POST http://localhost:8080/api/v1/holds -d '{...}'
+curl "http://localhost:16686/api/traces?service=api-gateway&limit=10"   # tìm trace có mặt cả 2 service
+curl "http://localhost:16686/api/traces/TRACE_ID"                        # xem cây span chi tiết
+```
+
+### Kết quả — cây span thật lấy từ Jaeger API
+
+```
+api-gateway: http post /api/v1/holds/**        (root, 666ms)
++-- api-gateway: http get                       (client call -> waiting-room, 59.9ms)
+|     +-- waiting-room: GET /tickets/{ticketId}/verify   (410us) <- CHILD SPAN thật, parent đúng
++-- api-gateway: http post                      (client call -> inventory-service, 550ms)
+      +-- inventory-service: http post /api/v1/holds     (507ms)
+```
+
+`waiting-room` (Go) là **con thật** của span gọi ra từ `api-gateway` (Java) —
+Spring RestClient tự gắn `traceparent` (W3C Trace Context) vào request
+outbound (không cần code thêm ở `HttpClientConfig`/`QueueAdmissionFilter`),
+`otelhttp` phía waiting-room tự đọc header đó và tạo span con đúng chỗ. Trace
+context propagate xuyên ngôn ngữ (Java <-> Go) hoàn toàn tự động qua chuẩn
+W3C — không cần glue code nào ở giữa, không cần cấu hình thêm.
+
+### Checklist
+
+- [x] 1 request thật xuyên gateway -> waiting-room -> inventory-service, cùng 1 traceID
+- [x] Span `waiting-room` đúng là CHILD_OF span outbound của `api-gateway` (không phải trace rời rạc trùng ID ngẫu nhiên)
+- [x] Không cần sửa code Java (RestClient tự propagate) lẫn code Go (otelhttp tự extract) — chỉ cần cả 2 bên cùng dùng chuẩn W3C Trace Context
+
+## 14. Stage 6 — RELEASE_RATE: ngân sách chung thay vì per-resource (2026-09-17)
+
+> Trước đây `releaseLoop` gọi `svc.ReleaseNext(resource, rate)` riêng cho
+> từng resource mỗi tick — 3 trip cùng hot thì tổng release = 3×rate, sai
+> với ý đồ ở docs/02-architecture.md ("release N vé/s ra backend", N là
+> ngân sách TOÀN HỆ THỐNG, không phải N/trip). Đổi `releaseLoop` sang
+> round-robin: mỗi tick chia đúng `globalRate` vé cho tất cả resource đang
+> active, 1 vé/resource/vòng cho tới khi hết ngân sách hoặc hết vé.
+
+### Thay đổi
+
+| File | Thay đổi |
+|---|---|
+| `services/waiting-room/cmd/api/main.go` | `releaseLoop`: bỏ vòng lặp gọi `ReleaseNext(resource, globalRate)` cho từng resource độc lập; thay bằng round-robin trừ dần 1 ngân sách chung `globalRate` qua các resource active mỗi tick |
+
+### Verify
+
+```bash
+docker compose up -d redis   # chỉ infra, không build
+docker exec rt-redis redis-cli FLUSHALL
+RELEASE_RATE=5 RELEASE_INTERVAL_MS=10000 REDIS_HOST=localhost SERVER_PORT=8085 go run ./cmd/api
+# 3 resource, mỗi resource 10 waiter join
+for res in global2-A global2-B global2-C; do
+  for i in $(seq 1 10); do curl -s -X POST "http://localhost:8085/queue/${res}/join" -d '{}' -o /dev/null; done
+done
+# check length ngay sau join, rồi check lại sau khi 1-2 tick trôi qua
+curl http://localhost:8085/queue/global2-A/length
+```
+
+### Kết quả thật
+
+- Server start: `16:26:50.776` (log `releaseRate=5, releaseIntervalMs=10000`)
+- 30 waiter join xong lúc `16:27:06.66` — ngay sau join, length mỗi resource = 10/10/10 (đúng, chưa tick nào chạy vì tick đầu `16:27:00.776` rơi TRƯỚC lúc join, không có gì để release)
+- Check lúc `16:27:23.2x` — đã trôi qua 2 tick nữa (`16:27:10.776` và `16:27:20.776`), mỗi tick chia đúng 5 vé round-robin (A:2, B:2, C:1 theo thứ tự `ActiveResources()` trả về) → sau 2 tick: A mất 4, B mất 4, C mất 2
+- Length đo được: **global2-A=6, global2-B=6, global2-C=8** — khớp chính xác dự đoán round-robin (không phải per-resource — nếu còn per-resource thì mỗi resource đã mất 2×5=10, tức về 0 hết cả 3, không lệch A/B/C như vậy)
+- Kết luận: ngân sách chung hoạt động đúng — tổng vé release luôn = `globalRate × số tick`, chia đều luân phiên qua các resource active, không cộng dồn theo số resource
+
+### Checklist
+
+- [x] `releaseLoop` release đúng ngân sách chung, không nhân theo số resource active
+- [x] Verify bằng số liệu thật (3 resource × 10 waiter, đối chiếu đúng công thức round-robin qua 2 tick)
+- [x] `go build`, `go vet`, `go test ./...` sạch (10/10 test pass — xem §15)
+
+## 15. Stage 6 — go test cho queue_service và redis_queue_repository (2026-09-17)
+
+> `internal/service` và `internal/repository` trước đây không có test nào.
+> Theo đúng convention project (Java dùng testcontainers cho test tầng
+> repository, fake/mock chỉ ở tầng service): service test dùng `fakeRepo`
+> in-memory (test business logic điều phối, không phải Redis), repository
+> test dùng testcontainers-go Redis thật (test đúng câu lệnh Redis chạy
+> đúng, không phải giả lập hành vi Redis).
+
+### File mới
+
+| File | Nội dung |
+|---|---|
+| `internal/service/queue_service_test.go` | `fakeRepo` implement `QueueRepository` trong RAM; 5 test: Join trả WAITING/position 0; Status phản ánh ADMITTED sau release; AwaitAdmission trả về ngay nếu đã admitted (race check); AwaitAdmission unblock khi release đến đồng thời; AwaitAdmission timeout đúng khi không ai release |
+| `internal/repository/redis_queue_repository_test.go` | Redis thật qua `testcontainers-go/modules/redis`; 5 test: FIFO order đúng theo Position; join trùng ticketID giữ nguyên position gốc (không nhảy xuống cuối hàng); Release trả đúng thứ tự FIFO + đánh dấu admitted; `active-queues` tự loại resource khi hết vé; SubscribeAdmission nhận đúng tín hiệu Pub/Sub khi Release |
+
+### Verify
+
+```bash
+cd services/waiting-room
+go test ./... -v
+```
+
+### Kết quả thật
+
+```
+ok  github.com/AndreNguyen03/rail-ticketing-v1/services/waiting-room/internal/service      3.150s
+ok  github.com/AndreNguyen03/rail-ticketing-v1/services/waiting-room/internal/repository   (testcontainers, Redis thật)
+```
+10/10 test pass — 5 service (fake repo), 5 repository (Redis thật qua testcontainers-go).
+
+### Checklist
+
+- [x] Service test dùng fake repo trong RAM — test đúng logic điều phối (race check IsAdmitted trước khi subscribe, timeout, unblock đồng thời)
+- [x] Repository test dùng Redis thật (testcontainers) — đúng convention project, không giả lập hành vi Redis
+- [x] Cả 2 bộ test pass sạch, không flaky (chạy lại xác nhận ổn định)
+
+## 16. Stage 6 — Quyết định: token verify multi-use hay consume-once? (2026-09-17)
+
+> Câu hỏi đặt ra: `GET /tickets/{id}/verify` có nên "tiêu" token (xoá
+> `admitted:{ticketID}` ngay sau lần verify thành công đầu tiên) hay giữ
+> cho dùng nhiều lần trong TTL 15 phút?
+
+### Quyết định: giữ multi-use trong TTL cố định 15 phút — KHÔNG đổi code
+
+Đọc lại `internal/repository/redis_queue_repository.go:112` (`IsAdmitted`) xác
+nhận implementation hiện tại đã đúng ý này từ đầu: `EXISTS admitted:{ticketID}`
+là thao tác **đọc**, không xoá key, TTL 900s set 1 lần duy nhất lúc `Release`
+(không sliding — không tự gia hạn mỗi lần verify).
+
+**Vì sao multi-use là lựa chọn đúng:**
+`queue.enforcement.protected-prefixes` (application.yml) bảo vệ CẢ
+`/api/v1/holds` LẪN `/api/v1/bookings`. Một luồng đặt vé thật gọi
+`QueueAdmissionFilter` (cùng 1 `X-Queue-Ticket`) ít nhất 2 lần — giữ chỗ rồi
+xác nhận, có thể thêm cả lệnh retry khi lỗi mạng. Nếu consume-once, request
+thứ 2 của CHÍNH người dùng vừa được admit sẽ bị 429 và đá ngược vào hàng đợi
+— phá luôn mục đích "được vào phòng chờ" (đã đến lượt thì phải làm xong cả
+luồng, không phải chỉ đúng 1 request).
+
+**Vì sao TTL vẫn nên CỐ ĐỊNH (không sliding), không renew mỗi lần verify:**
+Giữ nguyên hành vi hiện tại — không refresh TTL ở `IsAdmitted`. Đây là chủ ý
+giống mô hình phòng chờ thật (Ticketmaster/Queue-it): được vào thì có một cửa
+sổ THỜI GIAN CỐ ĐỊNH để hoàn tất checkout, hết giờ thì mất suất (dù vẫn đang
+"hoạt động") — tránh 1 người giữ slot vô thời hạn bằng cách liên tục gọi lại
+API, đảm bảo công bằng lượt xoay vòng cho người còn lại trong hàng đợi.
+
+### Checklist
+
+- [x] Xác nhận `IsAdmitted` là thao tác đọc thuần (EXISTS), không xoá token — multi-use trong TTL
+- [x] Xác nhận TTL không sliding/renew — cố ý, giữ đúng ngữ nghĩa "cửa sổ checkout có hạn"
+- [x] Không cần sửa code — quyết định giữ nguyên implementation hiện tại, chỉ ghi rõ lý do thiết kế

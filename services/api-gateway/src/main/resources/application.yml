@@ -34,6 +34,20 @@ spring:
               predicates:
                 - Path=/api/v1/trips/**
 
+clients:
+  waiting-room:
+    base-url: ${WAITING_ROOM_URL:http://localhost:8085}
+    connect-timeout-ms: 300
+    read-timeout-ms: 300
+
+# Stage 6: tắt mặc định (như INVENTORY_REDIS_ENABLED bên inventory-service) —
+# chỉ bật khi load test cho thấy front-door thật sự cần chặn (docs/05 §9 entry
+# condition), không bật sẵn cho traffic bình thường.
+queue:
+  enforcement:
+    enabled: ${QUEUE_ENFORCEMENT_ENABLED:false}
+    protected-prefixes: /api/v1/holds,/api/v1/bookings
+
 server:
   port: ${SERVER_PORT:8080}
   error:

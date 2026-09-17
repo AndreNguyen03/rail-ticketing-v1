@@ -165,6 +165,8 @@ services:
       SCHEDULE_URL: http://schedule-service:8081
       INVENTORY_URL: http://inventory-service:8082
       BOOKING_URL: http://booking-service:8083
+      WAITING_ROOM_URL: http://waiting-room:8085
+      QUEUE_ENFORCEMENT_ENABLED: "true"
       OTEL_SERVICE_NAME: api-gateway
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
@@ -292,6 +294,27 @@ services:
       OTEL_LOGS_EXPORTER: none
     depends_on:
       kafka:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+  waiting-room:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/waiting-room/Dockerfile
+    container_name: rt-waiting-room
+    ports:
+      - "8085:8085"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      RELEASE_RATE: "50"
+      RELEASE_INTERVAL_MS: "500"
+      OTEL_SERVICE_NAME: waiting-room
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    depends_on:
+      redis:
         condition: service_healthy
       jaeger:
         condition: service_started

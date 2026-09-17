@@ -25,6 +25,13 @@
       <groupId>org.springframework.cloud</groupId>
       <artifactId>spring-cloud-starter-gateway-server-webmvc</artifactId>
     </dependency>
+    <!-- Cho QueueAdmissionFilter gọi waiting-room (verify token) — cùng lý do
+         booking-service cần dependency này (ADR-0009): auto-configured
+         RestClient.Builder, không phải bare RestClient.create(). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-restclient</artifactId>
+    </dependency>
     <dependency>
       <groupId>io.micrometer</groupId>
       <artifactId>micrometer-tracing-bridge-otel</artifactId>

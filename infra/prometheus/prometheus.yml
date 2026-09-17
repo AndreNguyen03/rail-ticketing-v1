@@ -22,3 +22,8 @@ scrape_configs:
     metrics_path: /actuator/prometheus
     static_configs:
       - targets: ['booking-service:8083']
+
+  - job_name: waiting-room
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['waiting-room:8085']
