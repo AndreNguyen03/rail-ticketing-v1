@@ -1,4 +1,6 @@
--- Stage 4 — Hold Lua script (docs/03 §5, simplified for single-berth quantity=1..4 loop)
+-- Stage 4 — Hold Lua script (docs/03 §5-6: HGETALL + FIRST_FIT + random scanOffset,
+-- generalized from the doc's single-berth example to hold `quantity` berths in one
+-- atomic call — a group booking needs all-or-nothing across several berths)
 -- KEYS[1] = inv:{tripId}:{class}  (Hash: berthId -> "occ,held,level,carriage,berthNo,price")
 -- KEYS[2] = hold:{tripId}:{holdId} (String, TTL)
 -- ARGV[1] = journeyMask (int)
@@ -45,6 +47,16 @@ end
 
 if #chosen < qty then
   return {0, '', 'NO_BERTH_AVAILABLE'}
+end
+
+-- Defensive re-check (docs/03 §5): impossible in practice — Lua runs this whole
+-- script atomically, single-threaded, so no other script can touch these keys
+-- between the scan above and the HSET below. Kept anyway so a test can assert
+-- the assumption; if this ever fires, that assumption is wrong.
+for _, b in ipairs(chosen) do
+  if bit.band(bit.bor(b.occ, b.held), jmask) ~= 0 then
+    return {0, '', 'RACE_DETECTED'}
+  end
 end
 
 -- commit held bits

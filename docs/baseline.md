@@ -294,7 +294,56 @@ Kết quả 2026-09-15: `POST /holds` sau `docker kill rt-redis` vẫn `201` (`1
 - [x] `docker kill redis` mid-test → hold vẫn tạo được (fallback), không mất `CONFIRMED`
 - [x] Throughput: Redis depleted 506 berths trong vài giây đầu (93,439 sold-out trong 60s vs 79,070 DB baseline). Bottleneck shift từ inventory (row lock) → gateway (connection saturation). 311k Redis commands/60s. Với 49 trips (§C): 6,126 confirmed vs 134 baseline = ~46×. Front-door là giới hạn tiếp theo → Stage 6.
 - [x] Reconciliation sửa drift <2 phút: lần đầu chạy sau load test phát hiện 1950 berths drifted (Redis còn held bits, DB đã expire), fixed ngay trong 1 cycle (2026-09-16)
-- [ ] `HGETALL` 4KB + `FIRST_FIT random offset` đúng `docs/03 §6`
+- [x] `HGETALL` 4KB + `FIRST_FIT random offset` đúng `docs/03 §6` (2026-09-17, xem §7a)
+
+## 7a. Stage 4 — hoàn thành FIRST_FIT random offset (2026-09-17)
+
+> Mục còn lại duy nhất của Stage 4. `hold.lua` + `RedisInventoryService.tryHold` hoá ra đã
+> implement đúng HGETALL + FIRST_FIT + random `scanOffset` từ đầu (generalize cho multi-berth
+> qty>1, doc gốc chỉ ví dụ 1 berth) — việc thật sự thiếu là (1) defensive `RACE_DETECTED`
+> re-check mà doc giữ lại như một test invariant, và (2) **chưa ai verify bằng thực nghiệm**
+> rằng random offset thật sự tránh được collision như §6 khẳng định.
+
+### Thay đổi
+
+| File | Đổi |
+|---|---|
+| `services/inventory-service/.../lua/hold.lua` | thêm defensive re-check `RACE_DETECTED` trước khi `HSET` (đúng `docs/03 §5` — "impossible in practice, kept so a test can assert the assumption"). Sửa header comment, bỏ chữ "simplified" gây hiểu nhầm |
+| `docker-compose.yaml:35` | `redis` thêm `ports: 6379:6379` — cùng lý do với Kafka ở §6b: không publish port thì service chạy `java -jar` trên host không bao giờ reach được Redis |
+
+### Verify 2026-09-17 (local, infra-only)
+
+Test đầu tiên (xargs spawn 20 process `curl`/`python3` song song trên Windows Git-Bash) cho
+kết quả đáng ngờ: 39 hold liên tiếp trên SOFT_SEAT (128 berths) chỉ trải trong khoảng
+berthId 7–57, nhiều đoạn liên tiếp dài (27–46 liền một mạch) — **trông giống không random**.
+Điều tra bằng cách thêm log tạm thời (`DEBUG tryHold offset=... status=... ids=...`) rồi test
+lại theo 2 hướng để tách bạch nguyên nhân:
+
+```bash
+docker compose --profile services up -d postgres redis   # port 6379 giờ đã publish
+./mvnw -q -pl services/inventory-service -am package -DskipTests
+INVENTORY_REDIS_ENABLED=true MANAGEMENT_HEALTH_REDIS_ENABLED=false java -jar services/inventory-service/target/*.jar &
+
+# 1. Sequential (không đồng thời) — loại trừ nghi ngờ concurrency
+for i in $(seq 1 15); do curl ... -d '{"tripId":1,...,"preferredClass":"BERTH_6"}' http://localhost:8082/api/v1/holds; done
+
+# 2. Concurrency THẬT (ThreadPoolExecutor 1 process Python, không spawn process rời rạc như xargs)
+python3 concurrent_holds.py   # 60 worker threads, cùng lúc, class BERTH_4 (168 berths, chưa đụng)
+```
+
+**Kết quả**: test tuần tự — 15/15 offset khác nhau hoàn toàn (63 → 8516), berthId trải khắp
+149–336 (phạm vi BERTH_6 rộng), không đoạn liền mạch nào. Test đồng thời thật (60 thread cùng
+lúc) — **60/60 thành công, 60 berthId khác nhau tuyệt đối (0 trùng), trải 344–505**, không
+`RACE_DETECTED` lần nào. Kết luận: code đúng — batch xargs-process ban đầu bị nhiễu do
+overhead spawn 20 process riêng trên Windows Git-Bash (không phải bug sản phẩm); dùng
+`ThreadPoolExecutor` trong 1 process mới cho concurrency thật sự đáng tin trên môi trường này.
+
+### Checklist
+
+- [x] `RACE_DETECTED` defensive re-check thêm vào `hold.lua`, chưa lần nào fire (đúng — "impossible in practice")
+- [x] Random `scanOffset` xác nhận thật sự random qua log (offset trải 63–8516 trên 15 call)
+- [x] 60 concurrent hold thật (1 process, `ThreadPoolExecutor`) → 60 berthId khác nhau, 0 collision, trải rộng toàn bộ pool
+- [x] Redis reachable từ host cho dev loop `java -jar` (port 6379 publish, cùng pattern với Kafka §6b)
 
 ## 9. Stage 5 — Saga async full (2026-09-15)
 
