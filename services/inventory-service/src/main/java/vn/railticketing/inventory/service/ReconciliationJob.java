@@ -15,18 +15,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/**
- * Stage 4 — Redis ↔ PostgreSQL drift repair.
- *
- * Runs every 60s. For each inventory key in Redis, compares held_mask against DB.
- * DB is the source of truth. Any Redis berth whose held bits differ from DB is
- * corrected in-place via HSET.
- *
- * Drift sources:
- *   - Redis killed mid-hold (hold key gone, inventory hash still dirty)
- *   - Hold expired in DB (HoldExpiryJob) but release.lua never ran
- *   - Network partition caused split-brain writes
- */
+/** Repair Redis↔PG drift every 60s: PG is truth, wrong Redis bits fixed via HSET. */
 @Component
 public class ReconciliationJob {
 
@@ -58,7 +47,7 @@ public class ReconciliationJob {
         int checked = 0, drifted = 0, fixed = 0;
 
         for (String key : keys) {
-            // key format: inv:{tripId}:CLASS  e.g. inv:{1}:BERTH_4
+            // Key shape inv:{tripId}:CLASS.
             String[] parts = key.split(":");
             if (parts.length < 3) continue;
 
@@ -74,7 +63,7 @@ public class ReconciliationJob {
             Map<Object, Object> redisEntries = redis.opsForHash().entries(key);
             if (redisEntries.isEmpty()) continue;
 
-            // Build berthId → dbHeldMask lookup from DB (source of truth)
+            // berthId->heldMask map from DB as compare baseline.
             Map<Long, Integer> dbHeld = repo.findByTripIdAndBerthClass(tripId, berthClass)
                     .stream()
                     .collect(Collectors.toMap(BerthInventory::getBerthId, BerthInventory::getHeldMask));

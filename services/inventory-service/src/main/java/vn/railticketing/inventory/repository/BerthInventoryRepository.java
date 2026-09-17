@@ -9,9 +9,9 @@ import java.util.List;
 
 public interface BerthInventoryRepository extends JpaRepository<BerthInventory, Long> {
 
-    // ── Availability (read-only, no lock) ────────────────────────────────────
+    // Free-berth read: no lock.
 
-    // JPQL does not support bitwise operators — using native SQL for the bitmask check.
+    // JPQL lacks bitwise ops: native SQL for mask check.
     @Query(value = """
             SELECT * FROM berth_inventory
             WHERE trip_id        = :tripId
@@ -24,11 +24,9 @@ public interface BerthInventoryRepository extends JpaRepository<BerthInventory, 
             @Param("berthClass") String berthClass
     );
 
-    // ── Lock for hold creation (pessimistic, SKIP LOCKED) ────────────────────
+    // Hold creation lock: pessimistic SKIP LOCKED.
 
-    // @Lock is ignored with nativeQuery=true; FOR UPDATE SKIP LOCKED is in the SQL.
-    // SKIP LOCKED: competing requests skip locked rows and move to the next free berth
-    // instead of queuing — prevents the service from hanging under high contention.
+    // @Lock ignored with nativeQuery: SKIP LOCKED in SQL lets contenders skip rows, no hang.
     @Query(value = """
             SELECT * FROM berth_inventory
             WHERE trip_id        = :tripId

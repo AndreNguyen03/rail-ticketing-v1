@@ -13,6 +13,7 @@ import vn.railticketing.inventory.exception.InsufficientInventoryException;
 import vn.railticketing.inventory.repository.BerthInventoryRepository;
 import vn.railticketing.inventory.repository.HoldRepository;
 import vn.railticketing.inventory.web.dto.BerthDto;
+import vn.railticketing.inventory.web.dto.BerthMapper;
 import vn.railticketing.inventory.web.dto.CreateHoldRequest;
 import vn.railticketing.inventory.web.dto.HoldResponse;
 
@@ -30,6 +31,7 @@ public class HoldService {
     private final HoldRepository holdRepository;
     private final BerthInventoryRepository berthInventoryRepository;
     private final RedisInventoryService redisInventoryService;
+    private final BerthMapper berthMapper;
 
     @Value("${inventory.hold.ttl-seconds}")
     private long ttlSeconds;
@@ -37,10 +39,12 @@ public class HoldService {
     public HoldService(HoldRepository holdRepository,
                        BerthInventoryRepository berthInventoryRepository,
                        @Autowired(required = false)
-                       RedisInventoryService redisInventoryService) {
+                       RedisInventoryService redisInventoryService,
+                       BerthMapper berthMapper) {
         this.holdRepository = holdRepository;
         this.berthInventoryRepository = berthInventoryRepository;
         this.redisInventoryService = redisInventoryService;
+        this.berthMapper = berthMapper;
     }
 
     @Transactional(
@@ -61,7 +65,7 @@ public class HoldService {
             rollbackFor = Exception.class
     )
     public HoldResponse createHold(CreateHoldRequest request, UUID idempotencyKey) {
-        // Idempotency: same key → return original result
+        // Idempotent: duplicate key returns the original result.
         return holdRepository.findByIdempotencyKey(idempotencyKey)
                 .map(this::toResponse)
                 .orElseGet(() -> doCreateHold(request, idempotencyKey));
@@ -70,12 +74,12 @@ public class HoldService {
     private HoldResponse doCreateHold(CreateHoldRequest request, UUID idempotencyKey) {
         int journeyMask = computeJourneyMask(request.fromStationIndex(), request.toStationIndex());
 
-        // Stage 4: try Redis Lua first (atomic, ~25k/s). Fallback to DB FOR UPDATE SKIP LOCKED.
+        // Redis Lua first (~25k/s): fall back to DB SKIP LOCKED on failure.
         if (redisInventoryService != null && redisInventoryService.isEnabled()) {
             var r = redisInventoryService.tryHold(request.tripId(), request.preferredClass(), journeyMask,
                     request.quantity(), idempotencyKey.toString(), ttlSeconds);
             if (r != null && r.held()) {
-                // Redis reserved berths — mirror to DB as source of truth (best-effort)
+                // Redis reserved: mirror to DB (source of truth, best-effort).
                 List<Long> ids = Arrays.stream(r.berthIdsCsv().split(","))
                         .map(Long::valueOf).toList();
                 List<BerthInventory> berths = berthInventoryRepository.findAllByBerthIdIn(ids);
@@ -90,11 +94,10 @@ public class HoldService {
             if (r != null && "NO_BERTH_AVAILABLE".equals(r.status())) {
                 throw new InsufficientInventoryException(request.quantity(), 0);
             }
-            // r == null -> Redis down, fallback to DB
+            // Redis down: fall back to DB.
         }
 
-        // Lock berths atomically. FOR UPDATE SKIP LOCKED ensures competing requests
-        // pick different berths instead of queuing behind each other.
+        // SKIP LOCKED: contenders take different berths, no queueing.
         List<BerthInventory> locked = berthInventoryRepository.lockAvailableForJourney(
                 request.tripId(), journeyMask, request.preferredClass(), request.quantity());
 
@@ -102,7 +105,7 @@ public class HoldService {
             throw new InsufficientInventoryException(request.quantity(), locked.size());
         }
 
-        // Flip held bits for each selected berth
+        // Set held bits on locked berths.
         for (BerthInventory berth : locked) {
             berth.setHeldMask(berth.getHeldMask() | journeyMask);
         }
@@ -139,7 +142,7 @@ public class HoldService {
             clearHeldBits(hold);
             holdRepository.delete(hold);
         });
-        // If hold not found → silently succeed (idempotent)
+        // Hold missing: treat as done (idempotent).
     }
 
     @Transactional(
@@ -166,7 +169,7 @@ public class HoldService {
         holdRepository.delete(hold);
     }
 
-    // Called by HoldExpiryJob — same logic as releaseHold but hold is already loaded
+    // Expiry job entry: hold preloaded, same logic as releaseHold.
     @Transactional(
             readOnly    = false,
             isolation   = Isolation.READ_COMMITTED,
@@ -199,14 +202,7 @@ public class HoldService {
     }
 
     private HoldResponse toResponse(Hold hold, List<BerthInventory> berths, Instant expiresAt) {
-        List<BerthDto> berthDtos = berths.stream()
-                .map(b -> new BerthDto(
-                        b.getBerthId(), b.getCarriageNo(), b.getBerthNo(),
-                        b.getBerthClass(),
-                        b.getLevel() != null ? b.getLevel().intValue() : null,
-                        b.getPriceVnd()
-                ))
-                .toList();
+        List<BerthDto> berthDtos = berthMapper.toDtoList(berths);
 
         long totalPrice = berths.stream().mapToLong(BerthInventory::getPriceVnd).sum();
         long remainingTtl = java.time.Duration.between(Instant.now(), expiresAt).toSeconds();

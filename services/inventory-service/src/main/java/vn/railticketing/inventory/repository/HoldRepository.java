@@ -14,7 +14,7 @@ public interface HoldRepository extends JpaRepository<Hold, UUID> {
 
     Optional<Hold> findByIdempotencyKey(UUID idempotencyKey);
 
-    // Fetch holds with their berths eagerly to avoid N+1 in the expiry sweep
+    // Eager berths: avoid N+1 in expiry sweep.
     @Query("SELECT DISTINCT h FROM Hold h LEFT JOIN FETCH h.holdBerths WHERE h.expiresAt < :now")
     List<Hold> findExpiredWithBerths(@Param("now") Instant now);
 

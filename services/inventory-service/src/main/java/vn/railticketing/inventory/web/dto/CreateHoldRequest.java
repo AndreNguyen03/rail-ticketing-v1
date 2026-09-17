@@ -9,5 +9,5 @@ public record CreateHoldRequest(
         @Min(0) int fromStationIndex,
         @Min(1) int toStationIndex,
         @Min(1) @Max(4) int quantity,
-        String preferredClass   // nullable — null means any class
+        String preferredClass   // Null = any class.
 ) {}

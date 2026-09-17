@@ -24,13 +24,16 @@ public class TripService {
     private final TripRepository tripRepository;
     private final BerthRepository berthRepository;
     private final CarriageRepository carriageRepository;
+    private final BerthMapper berthMapper;
 
     public TripService(TripRepository tripRepository,
                        BerthRepository berthRepository,
-                       CarriageRepository carriageRepository) {
+                       CarriageRepository carriageRepository,
+                       BerthMapper berthMapper) {
         this.tripRepository = tripRepository;
         this.berthRepository = berthRepository;
         this.carriageRepository = carriageRepository;
+        this.berthMapper = berthMapper;
     }
 
     @Transactional(
@@ -76,8 +79,7 @@ public class TripService {
         Trip trip = tripRepository.findByIdWithStops(tripId)
                 .orElseThrow(() -> new TripNotFoundException(tripId));
 
-        // Second query: carriages + berths. Avoids mixing two collection fetches
-        // in a single query (Hibernate multi-bag exception).
+        // Split second query: avoid multi-bag fetch of 2 collections.
         List<Carriage> carriages = carriageRepository
                 .findAllWithBerthsByTripId(tripId)
                 .stream()
@@ -98,16 +100,7 @@ public class TripService {
                 .map(c -> new CarriageDto(
                         c.getCarriageNo(),
                         c.getBerthClass(),
-                        c.getBerths().stream()
-                                .map(b -> new BerthDto(
-                                        b.getBerthId(),
-                                        b.getCarriageNo(),
-                                        b.getBerthNo(),
-                                        b.getBerthClass(),
-                                        b.getLevel() != null ? b.getLevel().intValue() : null,
-                                        b.getPriceVnd()
-                                ))
-                                .toList()
+                        berthMapper.toDtoList(c.getBerths())
                 ))
                 .toList();
 

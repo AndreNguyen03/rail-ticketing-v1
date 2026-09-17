@@ -26,8 +26,7 @@ public class DataSeeder implements CommandLineRunner {
         this.seedService = seedService;
     }
 
-    // Stage-2 Experiment C: seed 49 SE1 days (2026-02-14 .. 2026-04-03) so the
-    // multi-trip k6 scenario has enough independent contention domains to measure.
+    // Seed 49 SE1 days: enough domains for multi-trip k6.
     private static final LocalDate SE1_START = LocalDate.of(2026, 2, 14);
     private static final int       SE1_DAYS  = 49;
 
@@ -35,7 +34,7 @@ public class DataSeeder implements CommandLineRunner {
     public void run(String... args) {
         List<Long> tripIds = new ArrayList<>();
 
-        // SE1 HN→SG: 49 consecutive days seeded by V2__more_trips.sql
+        // SE1 HN→SG: 49 consecutive days from V2.
         for (int d = 0; d < SE1_DAYS; d++) {
             String date = SE1_START.plusDays(d).toString();
             try {
@@ -46,7 +45,7 @@ public class DataSeeder implements CommandLineRunner {
             }
         }
 
-        // SE2 SG→HN: base date only
+        // SE2 SG→HN: base date only.
         try {
             scheduleClient.searchTrips("SG", "HN", "2026-02-14").trips()
                     .stream().map(ScheduleTripSummary::tripId).forEach(tripIds::add);
@@ -61,7 +60,7 @@ public class DataSeeder implements CommandLineRunner {
         }
 
         for (Long tripId : distinct) {
-            // Goes through Spring proxy → @Transactional on seedService.seedTrip() is honoured
+            // Via Spring proxy so @Transactional applies.
             seedService.seedTrip(tripId);
         }
     }

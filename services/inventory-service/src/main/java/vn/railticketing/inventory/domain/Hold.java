@@ -24,7 +24,7 @@ public class Hold {
     @Column(name = "to_station_index", nullable = false)
     private short toStationIndex;
 
-    // Pre-computed bitmask stored so release/commit don't recompute it
+    // Precomputed mask: release/commit skip recompute.
     @Column(name = "journey_mask", nullable = false)
     private int journeyMask;
 

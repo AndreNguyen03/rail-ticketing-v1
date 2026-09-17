@@ -11,12 +11,7 @@ import java.util.Optional;
 
 public interface TripRepository extends JpaRepository<Trip, Long> {
 
-    /**
-     * Find trips where both origin and destination stations exist in the correct order.
-     * Joins trip_stop twice — once for each station — and filters fromIndex < toIndex
-     * to enforce travel direction.
-     * Returns Object[] of [Trip, fromStop (TripStop), toStop (TripStop)].
-     */
+    /** Find trips in travel direction: double-join trip_stop, filter fromIndex < toIndex. Returns [Trip, from, to]. */
     @Query("""
             SELECT t, fromStop, toStop
             FROM Trip t
@@ -34,10 +29,7 @@ public interface TripRepository extends JpaRepository<Trip, Long> {
             @Param("date") LocalDate date
     );
 
-    /**
-     * Load a trip with all stops and their station names in a single query.
-     * DISTINCT prevents duplicate Trip instances caused by the collection join.
-     */
+    /** Load trip + stops + station names in 1 query: DISTINCT avoids duplicate Trip. */
     @Query("""
             SELECT DISTINCT t FROM Trip t
             LEFT JOIN FETCH t.stops s

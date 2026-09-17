@@ -15,12 +15,11 @@ public class TripStop {
     @JoinColumn(name = "trip_id")
     private Trip trip;
 
-    // Plain field used in JPQL WHERE clauses (fromStop.stationCode = :code)
+    // Plain field for JPQL filtering by station code.
     @Column(name = "station_code", nullable = false)
     private String stationCode;
 
-    // Join for station name — insertable/updatable false because station_code column
-    // is already managed by the stationCode field above
+    // Readonly station-name join: column already owned by stationCode.
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "station_code", referencedColumnName = "station_code",
                 insertable = false, updatable = false)

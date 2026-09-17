@@ -9,10 +9,7 @@ import java.util.List;
 
 public interface CarriageRepository extends JpaRepository<Carriage, Long> {
 
-    /**
-     * Load all carriages for a trip with berths in a single query.
-     * Avoids N+1: without this, each carriage.getBerths() call fires a separate query.
-     */
+    /** Load carriages + berths in 1 query: avoid N+1 per carriage. */
     @Query("""
             SELECT DISTINCT c FROM Carriage c
             LEFT JOIN FETCH c.berths

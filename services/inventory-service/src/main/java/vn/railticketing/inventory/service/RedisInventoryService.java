@@ -11,10 +11,7 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
-/**
- * Stage 4 — Redis hot path (docs/03 §5). All hold/release go through Lua atomic scripts.
- * PostgreSQL stays source of truth; this service is best-effort. On Redis failure caller falls back to DB.
- */
+/** Redis Lua hot path: atomic hold/release. PG is truth, Redis failure falls back to DB. */
 @Service
 public class RedisInventoryService {
 
@@ -53,7 +50,7 @@ public class RedisInventoryService {
             if (ok == 1) {
                 return new RedisHoldResult(ids, status);
             } else {
-                return new RedisHoldResult(null, status); // NO_BERTH_AVAILABLE etc
+                return new RedisHoldResult(null, status); // No berth: return status, no exception.
             }
         } catch (Exception e) {
             log.warn("Redis hold failed, fallback to DB: {}", e.getMessage());

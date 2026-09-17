@@ -52,7 +52,7 @@ public class BerthInventory {
     public void setOccupiedMask(int occupiedMask) { this.occupiedMask = occupiedMask; }
     public void setHeldMask(int heldMask)         { this.heldMask = heldMask; }
 
-    // Used by DataSeeder to create a new inventory row from schedule berth data
+    // Seeder factory: new row from schedule data, masks = 0.
     public static BerthInventory seed(Long berthId, Long tripId, Short carriageNo,
                                       Short berthNo, String berthClass, Short level,
                                       Long priceVnd) {

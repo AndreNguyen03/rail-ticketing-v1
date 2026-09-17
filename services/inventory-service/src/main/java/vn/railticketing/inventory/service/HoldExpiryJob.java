@@ -24,7 +24,7 @@ public class HoldExpiryJob {
         this.holdService = holdService;
     }
 
-    // fixedDelayString reads from application.yml so it can be tuned without recompile
+    // Interval from yml: tunable without rebuild.
     @Scheduled(fixedDelayString = "${inventory.hold.sweep-interval-ms}")
     public void sweep() {
         List<Hold> expired = holdRepository.findExpiredWithBerths(Instant.now());
@@ -32,8 +32,7 @@ public class HoldExpiryJob {
 
         log.info("HoldExpiryJob: releasing {} expired hold(s)", expired.size());
 
-        // Process one hold per transaction — a failure on one hold does not
-        // roll back the others.
+        // One transaction per hold: one failure does not roll back the rest.
         for (Hold hold : expired) {
             try {
                 holdService.expireHold(hold);

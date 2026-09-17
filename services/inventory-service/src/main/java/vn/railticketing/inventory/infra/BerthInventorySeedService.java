@@ -81,7 +81,7 @@ public class BerthInventorySeedService {
         log.info("BerthInventorySeedService: trip {} — {} berths seeded", tripId, seeded);
         if (redisEnabled && redisTemplate != null && !toSync.isEmpty()) {
             try {
-                // Group by berthClass for per-class hash keys inv:{tripId}:{class}
+                // Group by class for inv:{trip}:{class} keys.
                 var byClass = toSync.stream().collect(Collectors.groupingBy(BerthInventory::getBerthClass));
                 for (var e : byClass.entrySet()) {
                     String key = "inv:{" + tripId + "}:" + e.getKey();
