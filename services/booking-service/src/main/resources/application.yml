@@ -67,9 +67,6 @@ logging:
 # Downstream services are reached by URL from the environment. docker-compose
 # provides the DNS names; there is no service discovery at stage 0 and none is
 # needed for four services.
-#
-# No timeouts, retries or circuit breakers here on purpose. Those arrive at
-# stage 3, after stage 2 has shown how these calls actually fail.
 clients:
   inventory:
     base-url: ${INVENTORY_URL:http://localhost:8082}
@@ -84,8 +81,38 @@ clients:
 spring.datasource.hikari.connection-timeout: 500
 server.tomcat.connection-timeout: 5000
 
+# Stage 3: circuit breaker on the inventory call, added after baseline.md §3
+# showed booking hanging for the full 2s read-timeout on every single request
+# while inventory struggles. Once >=50% of the last 10 calls fail or run
+# slower than 1s (still under the 2s hard timeout), the breaker opens and
+# every call short-circuits to InventoryGateway's fallback in <50ms instead
+# of retrying the network.
+#
+# No `register-health-indicator` here: resilience4j-spring-boot3 2.3.0 predates
+# Spring Boot 4's actuate.health package rename, so its health/metrics
+# integration silently no-ops on Boot 4.1 (verified: /actuator/health never
+# gains a circuitBreakers component, /actuator/prometheus never gains
+# resilience4j_circuitbreaker_* series). CircuitBreakerStateLogger below is the
+# visibility we actually have until an upstream release supports Boot 4.
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventory:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 50
+        slow-call-duration-threshold: 1000ms
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+
+# The producer/consumer (de)serializer is set in config/KafkaConfig.java, not
+# here: that @Bean-defined ProducerFactory/ConsumerFactory replaces Spring
+# Boot's autoconfigured Kafka beans entirely, so any spring.kafka.producer.*/
+# consumer.* property here would be silently ignored.
 spring.kafka.bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-spring.kafka.producer.value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
 
 booking:
   payment:

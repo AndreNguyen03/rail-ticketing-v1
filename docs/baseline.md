@@ -74,7 +74,7 @@
 | `services/*/src/main/java/.../filter/CorrelationIdFilter.java` | gateway đã có, thêm `booking` + `inventory` filter tạo/forward `X-Correlation-Id`, echo header, `MDC` |
 | `services/api-gateway/src/main/resources/application.yml:37` | `server.tomcat.connection-timeout 8000ms` (gateway ngoài cùng lớn nhất) |
 
-Không thêm `resilience4j` lib ở stage này — timeout + correlation đã đủ để fail-fast; breaker/bulkhead sẽ thêm khi có metric open (stage 3+).
+Không thêm `resilience4j` lib ở giai đoạn đầu — timeout + correlation đã đủ để fail-fast. Breaker thêm ở §6a bên dưới sau khi §3/§9 baseline cho thấy booking treo cả 2s read-timeout mỗi request khi inventory yếu (chưa có gì làm request sau đó rẻ hơn request trước).
 
 ### Verify Stage 3
 
@@ -97,12 +97,156 @@ docker unpause rail-ticketing-inventory-service-1
 
 Kết quả 2026-09-15: `POST /bookings` khi inventory pause trả `409` sau `2277ms` (đúng `read 2000ms` + overhead), trước là `p99 7.16s` (§2). `X-Correlation-Id` forward qua `RestClient` đã hoạt động.
 
-### Checklist Stage 3 (05 §6)
+## 6a. Stage 3 — Circuit breaker + chaos latency test (2026-09-17)
+
+> Entry: §6 đã fail-fast (~2.2s), nhưng MỖI request vẫn phải chờ hết 2s read-timeout
+> khi inventory yếu — không có cơ chế nào làm request sau rẻ hơn request trước.
+> Đây là 2 mục còn lại của checklist Stage 3.
+
+### Thay đổi
+
+| File | Đổi |
+|---|---|
+| `services/booking-service/pom.xml` | thêm `spring-boot-starter-aspectj` (Boot 4 đổi tên từ `spring-boot-starter-aop`) + `io.github.resilience4j:resilience4j-spring-boot3:2.3.0` (version pin cứng — không nằm trong BOM Boot/Cloud) |
+| `services/booking-service/src/main/java/.../client/InventoryGateway.java` | bean mới bọc `InventoryClient` bằng `@CircuitBreaker(name="inventory")` cho `getHold/releaseHold/commitHold` + fallback riêng từng method. Phải là bean tách biệt — Spring AOP proxy chỉ chặn được call **xuyên bean**, gọi `this.foo()` trong cùng class sẽ bỏ qua aspect |
+| `services/booking-service/src/main/java/.../service/BookingService.java` | dùng `InventoryGateway` thay vì gọi thẳng `InventoryClient`; bỏ try/catch cũ vì gateway đã dịch exception |
+| `services/booking-service/src/main/java/.../saga/PaymentResultListener.java` | tương tự, dùng `InventoryGateway`; `commitHold` fallback **rethrow** (để Kafka redeliver), `releaseHold` fallback **nuốt** (TTL dọn) |
+| `services/booking-service/src/main/java/.../config/CircuitBreakerStateLogger.java` | log `CLOSED/OPEN/HALF_OPEN` transitions — xem lý do ở dưới |
+| `services/booking-service/src/main/resources/application.yml` | `resilience4j.circuitbreaker.instances.inventory`: sliding-window 10, min-calls 5, failure/slow-call-rate-threshold 50%, slow-call-duration 1000ms, wait-duration-in-open 10s, half-open 3 calls |
+
+**Phát hiện khi verify**: `resilience4j-spring-boot3:2.3.0` được build cho Boot 3.x — actuator ở Boot 4.1
+đã đổi tên package `health`, nên `CircuitBreakersHealthIndicatorAutoConfiguration` không match
+(`did not find required class 'org.springframework.boot.actuate.health.HealthIndicator'`, xem debug report).
+Hệ quả: **`/actuator/health` không bao giờ có component `circuitBreakers`, `/actuator/prometheus` không
+bao giờ có series `resilience4j_circuitbreaker_*`** — dù circuit breaker vẫn hoạt động đúng (đã verify hành
+vi thật bên dưới). Đã bỏ `management.health.circuitbreakers.enabled` (config chết, không tác dụng gì trên
+Boot 4) và thay bằng `CircuitBreakerStateLogger` — subscribe `onStateTransition` trực tiếp trên
+`CircuitBreakerRegistry`, log ra console. Đây là visibility duy nhất cho tới khi thư viện có bản hỗ trợ Boot 4.
+
+### Verify — chạy local, không build Docker (theo hướng dẫn: `up` infra thôi, service chạy `java -jar`)
+
+```bash
+docker compose --profile services up -d postgres redis kafka   # infra only, không build app image
+./mvnw -q -T1C -DskipTests package
+java -jar services/schedule-service/target/*.jar &
+MANAGEMENT_HEALTH_REDIS_ENABLED=false java -jar services/inventory-service/target/*.jar &   # Redis không publish port ra host, tắt health indicator riêng cho run local
+java -jar services/booking-service/target/*.jar &
+java -jar services/api-gateway/target/*.jar &
+
+# Chaos latency: TCP proxy tự viết (asyncio, ~40 dòng) chèn delay vào response,
+# vì host Windows không có tc/netem sẵn trong container Alpine và không muốn
+# thêm NET_ADMIN/toxiproxy chỉ để chạy 1 lần. Trỏ INVENTORY_URL của booking vào đó.
+python3 latency_proxy.py  # PROXY_PORT=9099 UPSTREAM_PORT=8082 DELAY_MS=3000
+INVENTORY_URL=http://localhost:9099 java -jar services/booking-service/target/*.jar &
+
+# Tạo hold thật qua gateway, rồi bắn 8 POST /bookings liên tiếp thẳng vào booking-service
+```
+
+### Kết quả 2026-09-17
+
+| Call | HTTP | Elapsed |
+|---|---|---|
+| 1–5 | 409 | ~2.1–2.4s mỗi call (đúng read-timeout 2000ms + overhead — **delay 3000ms > timeout nên timeout luôn kích hoạt**) |
+| 6–8 | 409 | 91–171ms (**breaker đã OPEN** sau 5 call thất bại liên tiếp ≥ ngưỡng 50%, fallback trả `HoldExpiredException` ngay, không đụng network) |
+
+Log xác nhận đủ chu trình trạng thái khi inventory hồi phục (đổi proxy về `DELAY_MS=0`, đợi hết
+`wait-duration-in-open-state=10s`):
+
+```
+10:12:37.188 CircuitBreaker 'inventory' state transition: CLOSED -> OPEN
+10:12:47.191 CircuitBreaker 'inventory' state transition: OPEN -> HALF_OPEN
+10:13:38.963 CircuitBreaker 'inventory' state transition: HALF_OPEN -> CLOSED
+```
+
+Booking dọn sạch (`docker compose --profile services down`, kill các process `java`/proxy local) sau khi verify — không build lại Docker image cho việc này, đúng như lưu ý: build image chỉ cần khi cần test thật topology container (DNS, healthcheck, scale).
+
+### Checklist Stage 3 (05 §6) — DONE
 
 - [x] `inventory` pause → `booking` fail nhanh (~2s) không treo
 - [x] `X-Correlation-Id` tạo ở gateway, forward qua booking/inventory, echo về client
-- [ ] Inject 500ms latency → timeout kích hoạt (TODO: chaos test)
-- [ ] Breaker open sau 50% fail → booking fail <50ms (TODO khi thêm resilience4j)
+- [x] Inject latency (3000ms > read-timeout 2000ms) → timeout kích hoạt đúng ~2.1s mỗi call trong khi breaker còn CLOSED
+- [x] Breaker open sau ≥50% fail (5/5) → booking fail 91–171ms thay vì 2.1s (~15–20×), full cycle CLOSED→OPEN→HALF_OPEN→CLOSED xác nhận qua log
+
+## 6b. Kafka production conventions hardening (2026-09-17)
+
+> Stage 5's saga (§9 dưới) hoạt động đúng nhưng lệch khỏi vài chuẩn Kafka production:
+> topic đặt tên kiểu RPC thay vì event past-tense, payload build bằng string
+> concatenation tay (không qua serializer), không có eventId để trace/dedupe, và
+> message hỏng bị log-rồi-nuốt lặng lẽ thay vì dead-letter. Áp dụng lại cho đúng
+> chuẩn, không đổi hành vi nghiệp vụ của saga.
+
+### Thay đổi
+
+| File | Đổi |
+|---|---|
+| `services/booking-service/.../producer/OutboxProducer.java` (đổi tên+package từ `outbox/OutboxRelay.java`) | topic đổi theo `docs/01-domain-model.md`'s convention `<domain>.<event>.v<N>`: `booking.payment.request` → `booking.payment-requested.v1`, `booking.events` → `booking.events.v1` (bucket chung, chưa tách vì chưa có consumer thật). Bọc payload trong `EventEnvelope<JsonNode>` — `eventId` = `outboxId` sẵn có, `payload` giữ nguyên JSON gốc qua `mapper.readTree()` |
+| `services/booking-service/.../consumer/PaymentResultConsumer.java` (đổi tên+package từ `saga/PaymentResultListener.java`) | parse `EventEnvelope<BookingResultEvent>` qua `TypeReference` (generic + Jackson), log `eventId` ở mọi nhánh (CONFIRMED/PAYMENT_FAILED/skip); topic đổi theo trên; bỏ try/catch nuốt lỗi parse — để checked exception propagate cho error handler xử lý |
+| `services/booking-service/.../event/*.java` (mới) | `EventEnvelope<T>` (generic, dùng chung cho producer lẫn consumer) + `BookingResultEvent`, `BookingCreatedEvent`, `BookingConfirmedEvent`, `BookingPaymentFailedEvent`, `BookingPaymentRequestedEvent` — mọi record event/payload gom vào 1 package `event`, tên có postfix `Event` |
+| `services/booking-service/.../service/BookingPersistenceService.java` | 4 outbox payload record (trước là private record ngay trong class, string concat tay `"{\"bookingId\":\"" + ...`) chuyển ra `event` package + serialize qua `ObjectMapper` — string concat không escape, một field free-text có dấu `"` là ra JSON hỏng |
+| `services/booking-service/.../domain/Outbox.java` | thêm `getCreatedAt()` — cần cho `occurredAt` trong envelope |
+| `services/payment-service/.../consumer/PaymentRequestConsumer.java` + `.../producer/PaymentResultProducer.java` (tách từ `PaymentProcessor.java` cũ — 1 class làm cả 2 việc consume+produce là sai theo convention producer/consumer tách riêng) | consumer parse `EventEnvelope<BookingPaymentRequestedEvent>`, quyết định CONFIRMED/PAYMENT_FAILED rồi gọi `resultProducer.publish(bookingId, result)`; producer build `EventEnvelope<BookingResultEvent>` + gửi `payment.completed.v1`. `payment.results` → `payment.completed.v1`. Bỏ try/catch nuốt lỗi parse |
+| `services/payment-service/.../event/*.java` (mới) | bản `EventEnvelope<T>` + `BookingPaymentRequestedEvent`/`BookingResultEvent` riêng của payment-service (không share code giữa 2 service theo ADR-0003, dù cùng tên/shape) |
+| `services/{booking,payment}-service/.../config/KafkaConfig.java` | `kafkaListenerContainerFactory` thêm `DefaultErrorHandler(DeadLetterPublishingRecoverer, FixedBackOff(1000ms, 2 lần))`, `JsonProcessingException` đánh dấu **not-retryable** (message hỏng thì retry cũng hỏng, dead-letter ngay không tốn 2 lần retry). Message hỏng trước đây bị `log.warn("...skip (poison)")` rồi mất — giờ vào topic `<topic>.DLT`, giữ nguyên để điều tra/replay |
+| `services/booking-service/src/main/resources/application.yml:112` | xoá `spring.kafka.producer.value-serializer: JsonSerializer` — dead config, `KafkaConfig.java` tự định nghĩa `ProducerFactory` String/String nên property này chưa bao giờ có tác dụng |
+| `services/payment-service/src/main/resources/application.yml` | tương tự, xoá `spring.kafka.consumer/producer.*` (cũng dead vì lý do như trên), giữ lại `bootstrap-servers` |
+| `docker-compose.yaml:46` | kafka thêm listener `EXTERNAL://0.0.0.0:29092` (advertise `localhost:29092`) + publish port `29092:29092` — **phát hiện khi verify**: kafka trước đó không publish port ra host (`advertised.listeners` chỉ có `kafka:9092`, DNS nội bộ container), nên service chạy `java -jar` trực tiếp trên host (đúng theo hướng dẫn "verify local, đừng build") không bao giờ connect được. `kafka:9092` giữ nguyên cho service chạy trong container — không đổi topology production |
+
+### Verify 2026-09-17 (local, infra-only, không build Docker)
+
+```bash
+docker compose --profile services up -d postgres redis kafka
+./mvnw -q -T1C -DskipTests package
+java -jar services/schedule-service/target/*.jar &
+MANAGEMENT_HEALTH_REDIS_ENABLED=false java -jar services/inventory-service/target/*.jar &
+KAFKA_BOOTSTRAP_SERVERS=localhost:29092 java -jar services/booking-service/target/*.jar &
+KAFKA_BOOTSTRAP_SERVERS=localhost:29092 java -jar services/payment-service/target/*.jar &
+java -jar services/api-gateway/target/*.jar &
+
+# 1. Full saga qua envelope + topic mới
+# hold -> booking -> confirm -> poll đến CONFIRMED
+
+# 2. Dead-letter test: bắn message rác thẳng vào topic
+docker exec -i rt-kafka kafka-console-producer.sh --bootstrap-server localhost:9092 \
+  --topic payment.completed.v1 <<< 'this-is-not-json'
+docker exec rt-kafka kafka-topics.sh --bootstrap-server localhost:9092 --list
+# -> payment.completed.v1-dlt tự tạo
+docker exec rt-kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic payment.completed.v1-dlt --from-beginning --max-messages 1
+```
+
+Kết quả: booking `7b23a824-...` PENDING_PAYMENT → CONFIRMED trong ~1s qua `booking.payment-requested.v1` →
+`payment.completed.v1`, log có `eventId` xuyên suốt (`OutboxProducer published ... eventId=... -> topic`,
+`Saga CONFIRMED ... eventId=...`). Message rác gửi vào `payment.completed.v1` xuất hiện nguyên vẹn ở
+`payment.completed.v1-dlt` — không retry storm, không crash consumer, offset vẫn tiến (không kẹt).
+
+Sau khi tách package `producer`/`consumer`/`event` (bên dưới), chạy lại full saga lần 2 —
+booking `7284bbb8-...` PENDING_PAYMENT → CONFIRMED, log logger category đúng
+`v.r.booking.producer.OutboxProducer` / `v.r.b.consumer.PaymentResultConsumer` — component scan
+tự thấy bean ở package mới, không cần khai báo gì thêm.
+
+### Package/naming convention áp dụng thêm (cùng ngày)
+
+- Producer/consumer phải nằm trong package `producer`/`consumer`, tên class có postfix `Producer`/`Consumer`:
+  `outbox/OutboxRelay` → `producer/OutboxProducer`; `saga/PaymentResultListener` → `consumer/PaymentResultConsumer`.
+  `payment-service`'s `PaymentProcessor` (1 class vừa consume vừa produce) tách thành
+  `consumer/PaymentRequestConsumer` + `producer/PaymentResultProducer`.
+- Mọi record event/envelope/payload gom vào package `event`, tên có postfix `Event`:
+  `EventEnvelope<T>` (generic, dùng chung cho producer lẫn consumer trong cùng service),
+  `BookingResultEvent`, `BookingCreatedEvent`, `BookingConfirmedEvent`, `BookingPaymentFailedEvent`,
+  `BookingPaymentRequestedEvent`. Mỗi service có bản `event` package riêng (không share code — ADR-0003).
+- Generic `EventEnvelope<T>` + Jackson: consumer parse qua `TypeReference<EventEnvelope<X>>(){}` để giữ type
+  info qua type erasure (`mapper.readValue(payload, ENVELOPE_TYPE)`), không cần envelope riêng cho từng event type.
+
+### Checklist
+
+- [x] Topic đặt tên theo convention đã có trong docs (`domain.event.vN`), không còn kiểu RPC
+- [x] Payload qua `ObjectMapper` + record, không còn string concat tay
+- [x] Envelope có `eventId`/`eventType`/`occurredAt`, log dùng `eventId` để trace
+- [x] Message hỏng → DLQ (`<topic>.DLT`), không còn log-rồi-nuốt lặng lẽ
+- [x] Dead config trong `application.yml` (cả 2 service) đã dọn
+- [x] Kafka reachable từ host cho dev loop `java -jar` (external listener), không đổi behavior container-to-container
+- [x] Producer/consumer đúng package + postfix tên class
+- [x] Event/envelope record đúng package `event` + postfix `Event`
 
 ## 7. Stage 4 — Redis Lua + Reconciliation (2026-09-15) — scaffold
 

@@ -10,18 +10,7 @@ import vn.railticketing.booking.repository.BookingRepository;
 import java.time.Instant;
 import java.util.List;
 
-/**
- * Stage 5 — Timeout sweeper for stuck PENDING_PAYMENT bookings.
- *
- * Problem: if payment-service dies permanently (not a transient crash), the
- * booking stays PENDING_PAYMENT forever — the outbox event is in Kafka but
- * payment never responds. The hold has already expired (inventory HoldExpiryJob
- * runs independently), but the booking record is orphaned.
- *
- * Fix: any booking whose expiresAt has passed while still PENDING_PAYMENT is
- * moved to PAYMENT_FAILED. The hold is already gone; this just closes the
- * booking record so clients stop polling and seats are not double-counted.
- */
+/** Sweep overdue PENDING bookings: move to PAYMENT_FAILED so clients stop polling, berths already reclaimed by TTL. */
 @Component
 public class BookingExpiryJob {
 

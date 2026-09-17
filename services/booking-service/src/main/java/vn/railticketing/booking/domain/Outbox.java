@@ -50,6 +50,7 @@ public class Outbox {
     public String getPayload() { return payload; }
     public String getEventType() { return eventType; }
     public UUID getAggregateId() { return aggregateId; }
+    public Instant getCreatedAt() { return createdAt; }
     public boolean isPublished() { return published; }
     public void setPublished(boolean published) { this.published = published; }
 }

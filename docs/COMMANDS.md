@@ -47,10 +47,18 @@ Human-readable view on http://localhost:8090:
 | schedule-service  | 8081 | scheduledb  | catalog    |
 | inventory-service | 8082 | inventorydb | contention |
 | booking-service   | 8083 | bookingdb   | contention |
+| payment-service   | 8084 | —           | fulfillment |
 
-Database alone, services run from the IDE — the normal development loop:
+Infra only, services run from the IDE (or `java -jar` after `./mvnw package`) —
+the normal development loop, avoids rebuilding a Docker image per code change:
 
-    docker compose up -d postgres
+    docker compose --profile services up -d postgres redis kafka
+
+Every service's `application.yml` defaults to `localhost` for Postgres/Redis. Kafka is
+the exception: its `advertised.listeners` is `kafka:9092` (container-DNS only, unreachable
+from the host), so it also publishes an `EXTERNAL` listener on host port `29092` — a
+host-run booking-service/payment-service needs `KAFKA_BOOTSTRAP_SERVERS=localhost:29092`
+(the in-container default `kafka:9092` stays unchanged for `--profile services` runs).
 
 Everything in containers:
 
@@ -80,3 +88,12 @@ Most search results target Boot 3.x. These ids changed:
 | spring-boot-starter-test      | per-starter: spring-boot-starter-webmvc-test, -data-jpa-test, ... |
 | org.testcontainers:postgresql | org.testcontainers:testcontainers-postgresql        |
 | spring-cloud-starter-gateway  | spring-cloud-starter-gateway-server-webmvc          |
+| spring-boot-starter-aop       | spring-boot-starter-aspectj                         |
+
+Third-party libraries lag the rename too: `io.github.resilience4j:resilience4j-spring-boot3`
+(pinned explicitly — not in any imported BOM) still targets Boot 3's `actuate.health` package
+as of 2.3.0, so its health indicator/metrics autoconfiguration silently no-ops on Boot 4.1 —
+the circuit breaker itself still works (verified in `docs/baseline.md` §6a), only the
+actuator wiring is dead. Confirm with `--debug` and grep the condition report for
+`CircuitBreakersHealthIndicatorAutoConfiguration` before assuming a health/metrics gap is a
+config mistake.

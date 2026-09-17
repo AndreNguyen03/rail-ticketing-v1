@@ -59,6 +59,19 @@
       <groupId>org.springframework.kafka</groupId>
       <artifactId>spring-kafka</artifactId>
     </dependency>
+    <!-- Renamed from spring-boot-starter-aop in Boot 4 (ADR-0007-style rename). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-aspectj</artifactId>
+    </dependency>
+    <!-- Stage 3: circuit breaker around the inventory client. Version pinned
+         explicitly — resilience4j is not in spring-boot-dependencies or
+         spring-cloud-dependencies, so the parent BOMs cannot manage it. -->
+    <dependency>
+      <groupId>io.github.resilience4j</groupId>
+      <artifactId>resilience4j-spring-boot3</artifactId>
+      <version>2.3.0</version>
+    </dependency>
     <dependency>
       <groupId>io.micrometer</groupId>
       <artifactId>micrometer-tracing-bridge-otel</artifactId>

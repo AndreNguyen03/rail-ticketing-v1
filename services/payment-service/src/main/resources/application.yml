@@ -4,16 +4,13 @@ spring:
   threads:
     virtual:
       enabled: true
+  # config/KafkaConfig.java defines its own ProducerFactory/ConsumerFactory beans,
+  # which replace Spring Boot's autoconfigured Kafka beans entirely — so only
+  # bootstrap-servers here has any effect; consumer/producer.* below would be
+  # silently ignored (kept previously only because they happened to match the
+  # Java config's own hardcoded String (de)serializers).
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-    consumer:
-      group-id: payment-service
-      auto-offset-reset: earliest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.StringSerializer
 server:
   port: 8084
 management:

@@ -1,5 +1,6 @@
 package vn.railticketing.booking.config;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Value;
@@ -11,8 +12,11 @@ import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -49,9 +53,17 @@ public class KafkaConfig {
     }
 
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(ConsumerFactory<String, String> cf) {
+    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(
+            ConsumerFactory<String, String> cf, KafkaTemplate<String, String> kafkaTemplate) {
         ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(cf);
+        // A message that never parses will never parse on retry either — send it straight
+        // to <topic>.DLT instead of retrying it forever or (the old behaviour) logging and
+        // silently dropping it after the default handler's retries were exhausted.
+        var recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate);
+        var errorHandler = new DefaultErrorHandler(recoverer, new FixedBackOff(1000L, 2L));
+        errorHandler.addNotRetryableExceptions(JsonProcessingException.class);
+        factory.setCommonErrorHandler(errorHandler);
         return factory;
     }
 }

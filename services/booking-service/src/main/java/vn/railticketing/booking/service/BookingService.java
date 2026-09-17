@@ -3,8 +3,7 @@ package vn.railticketing.booking.service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestClientException;
-import vn.railticketing.booking.client.InventoryClient;
+import vn.railticketing.booking.client.InventoryGateway;
 import vn.railticketing.booking.client.dto.HoldResponse;
 import vn.railticketing.booking.domain.Booking;
 import vn.railticketing.booking.exception.BookingNotConfirmableException;
@@ -14,32 +13,30 @@ import vn.railticketing.booking.web.dto.*;
 import java.util.List;
 import java.util.UUID;
 
-// Orchestration only — no @Transactional here.
-// All DB writes go through BookingPersistenceService (separate bean → proxy is honoured).
-// HTTP calls happen outside DB transactions to avoid holding connections during network I/O.
+// Orchestration only, no @Transactional: HTTP outside transactions to avoid holding connections.
 @Service
 public class BookingService {
 
     private static final Logger log = LoggerFactory.getLogger(BookingService.class);
 
-    private final InventoryClient inventoryClient;
+    private final InventoryGateway inventoryGateway;
     private final BookingPersistenceService persistenceService;
 
-    public BookingService(InventoryClient inventoryClient,
+    public BookingService(InventoryGateway inventoryGateway,
                           BookingPersistenceService persistenceService) {
-        this.inventoryClient = inventoryClient;
+        this.inventoryGateway = inventoryGateway;
         this.persistenceService = persistenceService;
     }
 
     public BookingResponse createBooking(CreateBookingRequest request, UUID idempotencyKey) {
-        // Idempotency check — no transaction needed for a simple read
+        // Idempotent: same key returns the old result.
         return persistenceService.findByIdempotencyKey(idempotencyKey)
                 .map(this::toResponse)
                 .orElseGet(() -> doCreateBooking(request, idempotencyKey));
     }
 
     private BookingResponse doCreateBooking(CreateBookingRequest request, UUID idempotencyKey) {
-        // HTTP call — outside any transaction
+        // HTTP outside transaction: no connection held while waiting on network.
         HoldResponse hold = fetchHoldOrThrow(request.holdId());
 
         if (hold.berths().size() != request.passengers().size()) {
@@ -52,8 +49,7 @@ public class BookingService {
         try {
             booking = persistenceService.persistNewBooking(request, hold, idempotencyKey);
         } catch (Exception e) {
-            // Naive compensation: DB write failed — release the hold so berths return to inventory.
-            // If this release call also fails, the hold TTL (15 min) cleans it up.
+            // Compensate failed DB write: release hold, 15m TTL cleans up if that fails too.
             tryReleaseHold(hold.holdId());
             throw e;
         }
@@ -64,7 +60,7 @@ public class BookingService {
     public BookingResponse confirmBooking(UUID bookingId, UUID idempotencyKey) {
         Booking booking = persistenceService.findByIdOrThrow(bookingId);
 
-        // Already processed — idempotent
+        // Already processed: return as-is to block double confirm.
         if (!"PENDING_PAYMENT".equals(booking.getStatus())) {
             if ("CONFIRMED".equals(booking.getStatus()) || "PAYMENT_FAILED".equals(booking.getStatus())) {
                 return toResponse(booking);
@@ -72,8 +68,7 @@ public class BookingService {
             throw new BookingNotConfirmableException(bookingId, booking.getStatus());
         }
 
-        // Stage 5 async: publish BookingPaymentRequested via outbox, return PENDING
-        // PaymentProcessor (via Kafka) will decide success/fail and drive saga via payment.results
+        // Async: write outbox then return PENDING, Kafka decides later.
         persistenceService.requestPayment(bookingId);
         log.info("confirmBooking async requested for {} (outbox)", bookingId);
         return toResponse(booking);
@@ -84,18 +79,13 @@ public class BookingService {
     }
 
     private HoldResponse fetchHoldOrThrow(UUID holdId) {
-        try {
-            return inventoryClient.getHold(holdId);
-        } catch (RestClientException e) {
-            throw new HoldExpiredException(holdId);
-        }
+        // Gateway already maps every failure to HoldExpiredException.
+        return inventoryGateway.getHold(holdId);
     }
 
     private void tryReleaseHold(UUID holdId) {
-        try { inventoryClient.releaseHold(holdId); }
-        catch (RestClientException e) {
-            log.warn("tryReleaseHold: could not release hold {} — TTL will clean up. {}", holdId, e.getMessage());
-        }
+        // Fallback already swallowed: TTL cleans up.
+        inventoryGateway.releaseHold(holdId);
     }
 
     private BookingResponse toResponse(Booking b) {

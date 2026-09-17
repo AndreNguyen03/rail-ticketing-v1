@@ -1,5 +1,7 @@
 package vn.railticketing.booking.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Propagation;
@@ -9,6 +11,10 @@ import vn.railticketing.booking.client.dto.HoldResponse;
 import vn.railticketing.booking.domain.Booking;
 import vn.railticketing.booking.domain.Outbox;
 import vn.railticketing.booking.domain.Ticket;
+import vn.railticketing.booking.event.BookingConfirmedEvent;
+import vn.railticketing.booking.event.BookingCreatedEvent;
+import vn.railticketing.booking.event.BookingPaymentFailedEvent;
+import vn.railticketing.booking.event.BookingPaymentRequestedEvent;
 import vn.railticketing.booking.exception.BookingNotFoundException;
 import vn.railticketing.booking.repository.BookingRepository;
 import vn.railticketing.booking.repository.OutboxRepository;
@@ -18,18 +24,26 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-// Owns all DB writes for booking-service.
-// Kept separate from BookingService so @Transactional methods are called
-// through the Spring proxy (not via this.method() self-invocation).
+// Owns all DB writes: separate bean so Spring proxy applies @Transactional.
 @Service
 public class BookingPersistenceService {
 
     private final BookingRepository bookingRepository;
     private final OutboxRepository outboxRepository;
+    private final ObjectMapper mapper;
 
-    public BookingPersistenceService(BookingRepository bookingRepository, OutboxRepository outboxRepository) {
+    public BookingPersistenceService(BookingRepository bookingRepository, OutboxRepository outboxRepository, ObjectMapper mapper) {
         this.bookingRepository = bookingRepository;
         this.outboxRepository = outboxRepository;
+        this.mapper = mapper;
+    }
+
+    private String toJson(Object payload) {
+        try {
+            return mapper.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize outbox payload", e);
+        }
     }
 
     @Transactional(
@@ -90,8 +104,8 @@ public class BookingPersistenceService {
         }
 
         Booking saved = bookingRepository.save(booking);
-        // Stage 5 outbox: same transaction as booking, relay will publish to Kafka
-        String payload = "{\"bookingId\":\"" + saved.getBookingId() + "\",\"tripId\":" + saved.getTripId() + ",\"status\":\"" + saved.getStatus() + "\"}";
+        // Outbox in same booking transaction: relay publishes to Kafka later.
+        String payload = toJson(new BookingCreatedEvent(saved.getBookingId(), saved.getTripId(), saved.getStatus()));
         outboxRepository.save(Outbox.create("booking", saved.getBookingId(), "BookingCreated", payload));
         return saved;
     }
@@ -109,7 +123,7 @@ public class BookingPersistenceService {
         booking.setHoldId(null);
         booking.setExpiresAt(null);
         Booking saved = bookingRepository.save(booking);
-        String payload = "{\"bookingId\":\"" + saved.getBookingId() + "\",\"status\":\"CONFIRMED\"}";
+        String payload = toJson(new BookingConfirmedEvent(saved.getBookingId(), "CONFIRMED"));
         outboxRepository.save(Outbox.create("booking", saved.getBookingId(), "BookingConfirmed", payload));
         return saved;
     }
@@ -127,7 +141,7 @@ public class BookingPersistenceService {
         booking.setHoldId(null);
         booking.setExpiresAt(null);
         Booking saved = bookingRepository.save(booking);
-        String payload = "{\"bookingId\":\"" + saved.getBookingId() + "\",\"status\":\"PAYMENT_FAILED\"}";
+        String payload = toJson(new BookingPaymentFailedEvent(saved.getBookingId(), "PAYMENT_FAILED"));
         outboxRepository.save(Outbox.create("booking", saved.getBookingId(), "BookingPaymentFailed", payload));
         return saved;
     }
@@ -141,12 +155,12 @@ public class BookingPersistenceService {
     public Booking requestPayment(UUID bookingId) {
         Booking booking = bookingRepository.findByIdWithTickets(bookingId)
                 .orElseThrow(() -> new BookingNotFoundException(bookingId));
-        // Idempotent confirm: gọi POST /confirm 2 lần khi đang PENDING chỉ publish 1 event
+        // Idempotent confirm: existing unpublished event means no new one.
         if (outboxRepository.existsByAggregateIdAndEventTypeAndPublishedFalse(
                 booking.getBookingId(), "BookingPaymentRequested")) {
             return booking;
         }
-        String payload = "{\"bookingId\":\"" + booking.getBookingId() + "\"}";
+        String payload = toJson(new BookingPaymentRequestedEvent(booking.getBookingId()));
         outboxRepository.save(Outbox.create("booking", booking.getBookingId(), "BookingPaymentRequested", payload));
         return booking;
     }

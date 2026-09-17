@@ -36,6 +36,8 @@ services:
     profiles: [services]
     image: redis:7-alpine
     container_name: rt-redis
+    ports:
+      - "6379:6379"   # lets a host-run `java -jar` (dev loop, no container build) reach Redis
     command: redis-server --save "" --appendonly no
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -47,13 +49,17 @@ services:
     profiles: [services]
     image: apache/kafka:3.7.0
     container_name: rt-kafka
+    ports:
+      - "29092:29092"   # EXTERNAL listener — lets a host-run `java -jar` (dev loop, no
+                         # container build) reach Kafka. `kafka:9092` stays internal-only,
+                         # unchanged for container-to-container traffic.
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1

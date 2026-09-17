@@ -1,5 +1,6 @@
 package vn.railticketing.payment.config;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -9,6 +10,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -44,9 +48,16 @@ public class KafkaConfig {
     }
 
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(ConsumerFactory<String, String> cf) {
+    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(
+            ConsumerFactory<String, String> cf, KafkaTemplate<String, String> kafkaTemplate) {
         ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(cf);
+        // Same convention as booking-service's KafkaConfig: dead-letter unparseable
+        // messages instead of retrying them forever or silently dropping them.
+        var recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate);
+        var errorHandler = new DefaultErrorHandler(recoverer, new FixedBackOff(1000L, 2L));
+        errorHandler.addNotRetryableExceptions(JsonProcessingException.class);
+        factory.setCommonErrorHandler(errorHandler);
         return factory;
     }
 }
