@@ -6,6 +6,16 @@ spring:
     virtual:
       enabled: true
 
+  # Stage 8: validate Keycloak-issued JWTs. Only jwks-uri is configured (no
+  # issuer-uri) so Spring Security validates token signatures but skips issuer
+  # claim comparison. This avoids the host/container URL mismatch in dev where
+  # clients hit localhost:8180 but the gateway reaches keycloak:8080.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwks-uri: ${KEYCLOAK_JWKS_URI:http://localhost:8180/realms/rail-ticketing/protocol/openid-connect/certs}
+
   cloud:
     gateway:
       server:

@@ -153,6 +153,30 @@ services:
 
   # ── Application services ───────────────────────────────────────────────────
 
+  keycloak:
+    profiles: [services]
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: rt-keycloak
+    # start-dev: in-memory DB, no HTTPS required. --import-realm: auto-import
+    # any *.json in /opt/keycloak/data/import on first startup.
+    command: start-dev --import-realm
+    ports:
+      - "8180:8080"   # Keycloak UI → http://localhost:8180  (admin/admin)
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_DB: dev-mem
+    volumes:
+      - ./infra/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # Keycloak 26 image has no curl/wget. Check that the realm OIDC discovery
+      # endpoint responds via bash TCP redirect (port 8080, internal).
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && printf 'GET /realms/rail-ticketing/.well-known/openid-configuration HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && cat <&3 | grep -q issuer"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
   api-gateway:
     profiles: [services]
     build:
@@ -167,6 +191,12 @@ services:
       BOOKING_URL: http://booking-service:8083
       WAITING_ROOM_URL: http://waiting-room:8085
       QUEUE_ENFORCEMENT_ENABLED: "true"
+      # Stage 8: gateway fetches Keycloak public key via internal Docker DNS.
+      # Clients get tokens from localhost:8180; gateway validates signatures
+      # from keycloak:8080 (same key, different host). issuer-uri is omitted
+      # from application.yml so Spring Security skips issuer claim validation
+      # — suitable for dev where host and container addresses differ.
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/rail-ticketing/protocol/openid-connect/certs
       OTEL_SERVICE_NAME: api-gateway
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
@@ -174,10 +204,16 @@ services:
       OTEL_METRICS_EXPORTER: none
       OTEL_LOGS_EXPORTER: none
     depends_on:
-      - schedule-service
-      - inventory-service
-      - booking-service
-      - jaeger
+      schedule-service:
+        condition: service_started
+      inventory-service:
+        condition: service_started
+      booking-service:
+        condition: service_started
+      jaeger:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
 
   schedule-service:
     profiles: [services]
@@ -261,6 +297,7 @@ services:
       DB_PASSWORD: booking_pw
       INVENTORY_URL: http://inventory-service:8082
       SCHEDULE_URL: http://schedule-service:8081
+      QUOTA_URL: http://quota-service:8086
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       OTEL_SERVICE_NAME: booking-service
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
@@ -272,6 +309,8 @@ services:
       postgres:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      quota-service:
         condition: service_healthy
       jaeger:
         condition: service_started
@@ -314,6 +353,42 @@ services:
       OTEL_SERVICE_NAME: waiting-room
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     depends_on:
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+  quota-service:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/quota-service/Dockerfile
+    container_name: rt-quota
+    ports:
+      - "8086:8086"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: quota_user
+      DB_PASSWORD: quota_pw
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      QUOTA_REDIS_ENABLED: "true"
+      OTEL_SERVICE_NAME: quota-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8086/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       jaeger:

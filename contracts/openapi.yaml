@@ -39,7 +39,7 @@ servers:
 # public. Availability is the first endpoint a scalper bot hits, so it sits on
 # the authenticated side from day one — stage 7 caps requests per identity.
 security:
-  - XIdentity: []
+  - OpenIDConnect: []
 
 tags:
   - name: schedule
@@ -278,18 +278,13 @@ components:
 
   securitySchemes:
 
-    XIdentity:
-      type: apiKey
-      in: header
-      name: X-Identity
-      description: |
-        The caller's identity. At stage 0 this header is accepted without any
-        verification — it exists so that every endpoint which will need an
-        identity already declares one.
-
-        Stage 8 replaces this scheme with OpenID Connect through Keycloak. The
-        set of operations requiring identity does not change, only how identity
-        is proven, so that migration is not a breaking change for the contract.
+    OpenIDConnect:
+      type: openIdConnect
+      # Stage 8: real auth via Keycloak. The gateway validates the JWT and
+      # extracts the subject claim, forwarding it as X-Identity to downstream
+      # services. Downstream services are unchanged — they read X-Identity as
+      # before, but the value is now a verified Keycloak subject UUID.
+      openIdConnectUrl: http://localhost:8180/realms/rail-ticketing/.well-known/openid-configuration
 
   parameters:
 
