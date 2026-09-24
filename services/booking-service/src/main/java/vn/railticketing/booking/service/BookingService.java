@@ -4,10 +4,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import vn.railticketing.booking.client.InventoryGateway;
+import vn.railticketing.booking.client.QuotaGateway;
 import vn.railticketing.booking.client.dto.HoldResponse;
+import vn.railticketing.booking.client.dto.QuotaCheckRequest;
+import vn.railticketing.booking.client.dto.QuotaCheckResponse;
+import vn.railticketing.booking.client.dto.QuotaPassengerEntry;
 import vn.railticketing.booking.domain.Booking;
 import vn.railticketing.booking.exception.BookingNotConfirmableException;
 import vn.railticketing.booking.exception.HoldExpiredException;
+import vn.railticketing.booking.exception.QuotaExceededException;
 import vn.railticketing.booking.web.dto.*;
 
 import java.util.List;
@@ -20,11 +25,14 @@ public class BookingService {
     private static final Logger log = LoggerFactory.getLogger(BookingService.class);
 
     private final InventoryGateway inventoryGateway;
+    private final QuotaGateway     quotaGateway;
     private final BookingPersistenceService persistenceService;
 
     public BookingService(InventoryGateway inventoryGateway,
+                          QuotaGateway quotaGateway,
                           BookingPersistenceService persistenceService) {
         this.inventoryGateway = inventoryGateway;
+        this.quotaGateway     = quotaGateway;
         this.persistenceService = persistenceService;
     }
 
@@ -45,12 +53,29 @@ public class BookingService {
                     ") must match berth count in hold (" + hold.berths().size() + ")");
         }
 
+        // Quota check: after hold fetch (provides direction), before DB write.
+        // idempotencyKey doubles as the quota reservation key so both stay in sync.
+        // null response = quota-service down → fail-open, logged by QuotaGateway.
+        QuotaCheckRequest quotaReq = new QuotaCheckRequest(
+                idempotencyKey,
+                (short) hold.fromStationIndex(),
+                (short) hold.toStationIndex(),
+                request.passengers().stream()
+                        .map(p -> new QuotaPassengerEntry(p.idNumber(), 1))
+                        .toList());
+        QuotaCheckResponse quotaResp = quotaGateway.checkAndReserve(quotaReq);
+        if (quotaResp != null && !quotaResp.allowed()) {
+            tryReleaseHold(hold.holdId());
+            throw new QuotaExceededException(quotaResp.violations());
+        }
+
         Booking booking;
         try {
             booking = persistenceService.persistNewBooking(request, hold, idempotencyKey);
         } catch (Exception e) {
-            // Compensate failed DB write: release hold, 15m TTL cleans up if that fails too.
+            // Compensate failed DB write: release hold and quota reservation.
             tryReleaseHold(hold.holdId());
+            quotaGateway.releaseQuota(idempotencyKey);   // best-effort
             throw e;
         }
 
@@ -86,6 +111,11 @@ public class BookingService {
     private void tryReleaseHold(UUID holdId) {
         // Fallback already swallowed: TTL cleans up.
         inventoryGateway.releaseHold(holdId);
+    }
+
+    // Package-visible so BookingExpiryJob can release quota when sweeping expired bookings.
+    void tryReleaseQuota(UUID idempotencyKey) {
+        quotaGateway.releaseQuota(idempotencyKey);
     }
 
     private BookingResponse toResponse(Booking b) {

@@ -76,6 +76,10 @@ clients:
     base-url: ${SCHEDULE_URL:http://localhost:8081}
     connect-timeout-ms: 500
     read-timeout-ms: 1000
+  quota:
+    base-url: ${QUOTA_URL:http://localhost:8086}
+    connect-timeout-ms: 300
+    read-timeout-ms: 800
 
 # Stage 3: timeouts decreasing inward (gateway 8s > booking 5s > inventory 2s > DB 500ms)
 spring.datasource.hikari.connection-timeout: 500
@@ -107,6 +111,21 @@ resilience4j:
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 3
         automatic-transition-from-open-to-half-open-enabled: true
+      quota:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 50
+        slow-call-duration-threshold: 800ms
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # 4xx are business errors (e.g. 409 quota exceeded), not infrastructure
+        # failures. Ignore them so they don't trip the circuit breaker — the
+        # fallback still handles them for correct business logic.
+        ignore-exceptions:
+          - org.springframework.web.client.HttpClientErrorException
 
 # The producer/consumer (de)serializer is set in config/KafkaConfig.java, not
 # here: that @Bean-defined ProducerFactory/ConsumerFactory replaces Spring

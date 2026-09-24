@@ -10,6 +10,7 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 import vn.railticketing.booking.exception.BookingNotFoundException;
 import vn.railticketing.booking.exception.BookingNotConfirmableException;
 import vn.railticketing.booking.exception.HoldExpiredException;
+import vn.railticketing.booking.exception.QuotaExceededException;
 
 import java.net.URI;
 
@@ -42,6 +43,17 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         pd.setType(URI.create("https://railticketing.vn/problems/booking-not-confirmable"));
         pd.setTitle("Booking not confirmable");
         pd.setInstance(URI.create(req.getRequestURI()));
+        pd.setProperty("traceId", MDC.get("correlationId"));
+        return pd;
+    }
+
+    @ExceptionHandler(QuotaExceededException.class)
+    ProblemDetail handleQuotaExceeded(QuotaExceededException ex, HttpServletRequest req) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create("https://railticketing.vn/problems/quota-exceeded"));
+        pd.setTitle("Ticket quota exceeded");
+        pd.setInstance(URI.create(req.getRequestURI()));
+        pd.setProperty("violations", ex.getViolations());
         pd.setProperty("traceId", MDC.get("correlationId"));
         return pd;
     }
