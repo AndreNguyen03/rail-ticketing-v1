@@ -18,6 +18,16 @@ management:
     web:
       exposure:
         include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
 logging:
   pattern:
     console: "%d{HH:mm:ss.SSS} %-5level [${spring.application.name},%X{traceId:-},%X{spanId:-}] %logger{36} - %msg%n"
