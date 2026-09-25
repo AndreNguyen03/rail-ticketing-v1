@@ -20,6 +20,7 @@ COPY services/inventory-service/pom.xml services/inventory-service/
 COPY services/booking-service/pom.xml services/booking-service/
 COPY services/payment-service/pom.xml services/payment-service/
 COPY services/quota-service/pom.xml services/quota-service/
+COPY services/fare-service/pom.xml services/fare-service/
 RUN mvn -B -pl services/schedule-service -am dependency:go-offline
 
 COPY services/schedule-service/src services/schedule-service/src

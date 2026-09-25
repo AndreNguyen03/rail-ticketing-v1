@@ -298,6 +298,7 @@ services:
       INVENTORY_URL: http://inventory-service:8082
       SCHEDULE_URL: http://schedule-service:8081
       QUOTA_URL: http://quota-service:8086
+      FARE_URL: http://fare-service:8087
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       OTEL_SERVICE_NAME: booking-service
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
@@ -354,6 +355,34 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     depends_on:
       redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+  fare-service:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/fare-service/Dockerfile
+    container_name: rt-fare
+    ports:
+      - "8087:8087"
+    environment:
+      SCHEDULE_URL: http://schedule-service:8081
+      OTEL_SERVICE_NAME: fare-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8087/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      schedule-service:
         condition: service_healthy
       jaeger:
         condition: service_started

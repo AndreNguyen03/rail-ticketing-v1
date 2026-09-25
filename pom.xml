@@ -19,6 +19,7 @@
     <module>services/booking-service</module>
     <module>services/payment-service</module>
     <module>services/quota-service</module>
+    <module>services/fare-service</module>
   </modules>
 
   <properties>

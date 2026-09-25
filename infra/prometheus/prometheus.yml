@@ -28,6 +28,11 @@ scrape_configs:
     static_configs:
       - targets: ['waiting-room:8085']
 
+  - job_name: fare-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['fare-service:8087']
+
   - job_name: quota-service
     metrics_path: /actuator/prometheus
     static_configs:
