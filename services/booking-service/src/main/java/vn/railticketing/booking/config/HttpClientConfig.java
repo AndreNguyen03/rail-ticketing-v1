@@ -8,7 +8,9 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.support.RestClientAdapter;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
+import vn.railticketing.booking.client.FareClient;
 import vn.railticketing.booking.client.InventoryClient;
+import vn.railticketing.booking.client.InventoryRefundClient;
 import vn.railticketing.booking.client.QuotaClient;
 
 import java.time.Duration;
@@ -64,5 +66,57 @@ public class HttpClientConfig {
         RestClientAdapter adapter = RestClientAdapter.create(restClient);
         HttpServiceProxyFactory proxy = HttpServiceProxyFactory.builderFor(adapter).build();
         return proxy.createClient(QuotaClient.class);
+    }
+
+    // Stage 9: inventory refund/exchange endpoint (same base URL as inventory client)
+    @Bean
+    public InventoryRefundClient inventoryRefundClient(
+            RestClient.Builder builder,
+            @Value("${clients.inventory.base-url}") String baseUrl,
+            @Value("${clients.inventory.connect-timeout-ms:500}") int connectMs,
+            @Value("${clients.inventory.read-timeout-ms:2000}") int readMs) {
+
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Duration.ofMillis(connectMs));
+        factory.setReadTimeout(Duration.ofMillis(readMs));
+
+        RestClient restClient = builder.baseUrl(baseUrl)
+                .requestFactory(factory)
+                .requestInterceptor((request, body, execution) -> {
+                    String cid = MDC.get("correlationId");
+                    if (cid == null) cid = MDC.get("traceId");
+                    if (cid != null) request.getHeaders().set("X-Correlation-Id", cid);
+                    return execution.execute(request, body);
+                })
+                .build();
+        RestClientAdapter adapter = RestClientAdapter.create(restClient);
+        HttpServiceProxyFactory proxy = HttpServiceProxyFactory.builderFor(adapter).build();
+        return proxy.createClient(InventoryRefundClient.class);
+    }
+
+    // Stage 9: fare-service (pricing + refund amount calculation)
+    @Bean
+    public FareClient fareClient(
+            RestClient.Builder builder,
+            @Value("${clients.fare.base-url}") String baseUrl,
+            @Value("${clients.fare.connect-timeout-ms:500}") int connectMs,
+            @Value("${clients.fare.read-timeout-ms:1000}") int readMs) {
+
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Duration.ofMillis(connectMs));
+        factory.setReadTimeout(Duration.ofMillis(readMs));
+
+        RestClient restClient = builder.baseUrl(baseUrl)
+                .requestFactory(factory)
+                .requestInterceptor((request, body, execution) -> {
+                    String cid = MDC.get("correlationId");
+                    if (cid == null) cid = MDC.get("traceId");
+                    if (cid != null) request.getHeaders().set("X-Correlation-Id", cid);
+                    return execution.execute(request, body);
+                })
+                .build();
+        RestClientAdapter adapter = RestClientAdapter.create(restClient);
+        HttpServiceProxyFactory proxy = HttpServiceProxyFactory.builderFor(adapter).build();
+        return proxy.createClient(FareClient.class);
     }
 }

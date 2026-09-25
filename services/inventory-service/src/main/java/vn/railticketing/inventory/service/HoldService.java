@@ -169,6 +169,48 @@ public class HoldService {
         holdRepository.delete(hold);
     }
 
+    // Stage 9 — Refund: clear occupiedMask bits for berths that belonged to a
+    // refunded ticket. Inverse of commitHold — no hold record exists at this point.
+    @Transactional(
+            readOnly    = false,
+            isolation   = Isolation.READ_COMMITTED,
+            propagation = Propagation.REQUIRED,
+            rollbackFor = Exception.class
+    )
+    public void releaseOccupied(List<Long> berthIds, int journeyMask) {
+        List<BerthInventory> berths = berthInventoryRepository.findAllByBerthIdIn(berthIds);
+        for (BerthInventory berth : berths) {
+            berth.setOccupiedMask(berth.getOccupiedMask() & ~journeyMask);
+        }
+    }
+
+    // Stage 9 — Exchange: atomically release old berth's occupiedMask bits and
+    // commit a new hold (held → occupied) in a single transaction.
+    @Transactional(
+            readOnly    = false,
+            isolation   = Isolation.READ_COMMITTED,
+            propagation = Propagation.REQUIRED,
+            rollbackFor = Exception.class
+    )
+    public void exchange(Long oldBerthId, int journeyMask, java.util.UUID newHoldId) {
+        // Release old occupied bits
+        List<BerthInventory> oldBerths = berthInventoryRepository.findAllByBerthIdIn(List.of(oldBerthId));
+        for (BerthInventory b : oldBerths) b.setOccupiedMask(b.getOccupiedMask() & ~journeyMask);
+
+        // Commit new hold (held → occupied)
+        Hold hold = holdRepository.findByIdWithBerths(newHoldId)
+                .orElseThrow(() -> new HoldNotFoundException(newHoldId));
+        List<Long> newBerthIds = hold.getHoldBerths().stream()
+                .map(HoldBerth::getBerthId).toList();
+        List<BerthInventory> newBerths = berthInventoryRepository.findAllByBerthIdIn(newBerthIds);
+        int newMask = hold.getJourneyMask();
+        for (BerthInventory b : newBerths) {
+            b.setOccupiedMask(b.getOccupiedMask() | newMask);
+            b.setHeldMask(b.getHeldMask() & ~newMask);
+        }
+        holdRepository.delete(hold);
+    }
+
     // Expiry job entry: hold preloaded, same logic as releaseHold.
     @Transactional(
             readOnly    = false,

@@ -45,6 +45,13 @@ public class Booking {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 
+    // Stage 9: refund lifecycle
+    @Column(name = "refund_amount_vnd")
+    private Long refundAmountVnd;
+
+    @Column(name = "refunded_at")
+    private Instant refundedAt;
+
     @OneToMany(mappedBy = "booking", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<Ticket> tickets = new ArrayList<>();
 
@@ -61,9 +68,14 @@ public class Booking {
     public Instant getCreatedAt()    { return createdAt; }
     public List<Ticket> getTickets() { return tickets; }
 
-    public void setStatus(String status)       { this.status = status; }
-    public void setHoldId(UUID holdId)         { this.holdId = holdId; }
-    public void setExpiresAt(Instant expiresAt){ this.expiresAt = expiresAt; }
+    public Long getRefundAmountVnd()       { return refundAmountVnd; }
+    public Instant getRefundedAt()         { return refundedAt; }
+
+    public void setStatus(String status)              { this.status = status; }
+    public void setHoldId(UUID holdId)                { this.holdId = holdId; }
+    public void setExpiresAt(Instant expiresAt)       { this.expiresAt = expiresAt; }
+    public void setRefundAmountVnd(Long amount)       { this.refundAmountVnd = amount; }
+    public void setRefundedAt(Instant at)             { this.refundedAt = at; }
 
     public static Booking create(Long tripId, UUID holdId, String contactName,
                                   String contactPhone, String contactEmail,

@@ -33,9 +33,9 @@ public class OutboxProducer {
     private static String topicFor(String eventType) {
         return switch (eventType) {
             case "BookingPaymentRequested" -> "booking.payment-requested.v1";
-            // Other booking domain events (BookingCreated/Confirmed/PaymentFailed) share one
-            // bucket topic until a real consumer (ticket/notification-service, stage 6+)
-            // needs them split — no point pre-splitting a topic nothing reads yet.
+            // Stage 9: refund event — payment-service consumes and reverses the charge.
+            case "BookingRefunded"         -> "booking.refunded.v1";
+            // Other booking domain events share a bucket topic (no consumer yet).
             default -> "booking.events.v1";
         };
     }

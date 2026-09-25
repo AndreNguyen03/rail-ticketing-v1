@@ -4,6 +4,7 @@ import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import vn.railticketing.booking.client.dto.CreateHoldRequest;
 import vn.railticketing.booking.client.dto.HoldResponse;
 import vn.railticketing.booking.exception.HoldExpiredException;
 
@@ -26,6 +27,12 @@ public class InventoryGateway {
         return inventoryClient.getHold(holdId);
     }
 
+    // Stage 9: used by exchange flow to create a new hold for the replacement berth.
+    @CircuitBreaker(name = "inventory", fallbackMethod = "createHoldFallback")
+    public HoldResponse createHold(CreateHoldRequest request, UUID idempotencyKey) {
+        return inventoryClient.createHold(request, idempotencyKey);
+    }
+
     @CircuitBreaker(name = "inventory", fallbackMethod = "releaseHoldFallback")
     public void releaseHold(UUID holdId) {
         inventoryClient.releaseHold(holdId);
@@ -40,6 +47,11 @@ public class InventoryGateway {
     private HoldResponse getHoldFallback(UUID holdId, Exception e) {
         log.warn("getHold({}) short-circuited: {}", holdId, e.toString());
         throw new HoldExpiredException(holdId);
+    }
+
+    private HoldResponse createHoldFallback(CreateHoldRequest req, UUID idempotencyKey, Exception e) {
+        log.warn("createHold(trip={}) short-circuited: {}", req.tripId(), e.toString());
+        throw new HoldExpiredException(idempotencyKey); // reuse same exception class
     }
 
     // Best-effort: swallow error, hold TTL reclaims berths.

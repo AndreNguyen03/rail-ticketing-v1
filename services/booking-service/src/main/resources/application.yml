@@ -80,6 +80,10 @@ clients:
     base-url: ${QUOTA_URL:http://localhost:8086}
     connect-timeout-ms: 300
     read-timeout-ms: 800
+  fare:
+    base-url: ${FARE_URL:http://localhost:8087}
+    connect-timeout-ms: 500
+    read-timeout-ms: 1000
 
 # Stage 3: timeouts decreasing inward (gateway 8s > booking 5s > inventory 2s > DB 500ms)
 spring.datasource.hikari.connection-timeout: 500
