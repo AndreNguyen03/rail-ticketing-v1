@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waiting-room
+  namespace: rail-ticketing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: waiting-room
+  template:
+    metadata:
+      labels:
+        app: waiting-room
+    spec:
+      initContainers:
+        - name: wait-for-redis
+          image: busybox:1.36
+          command: ["sh", "-c", "until nc -z redis 6379; do sleep 2; done"]
+      containers:
+        - name: waiting-room
+          image: rail-ticketing-waiting-room:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8085
+          envFrom:
+            - configMapRef:
+                name: app-config
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: waiting-room
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi

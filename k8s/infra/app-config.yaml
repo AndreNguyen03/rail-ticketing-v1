@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: rail-ticketing
+data:
+  # Service URLs — DNS names match K8s Service names in same namespace
+  INVENTORY_URL: "http://inventory-service:8082"
+  SCHEDULE_URL: "http://schedule-service:8081"
+  BOOKING_URL: "http://booking-service:8083"
+  QUOTA_URL: "http://quota-service:8086"
+  FARE_URL: "http://fare-service:8087"
+  WAITING_ROOM_URL: "http://waiting-room:8085"
+  KEYCLOAK_JWKS_URI: "http://keycloak:8080/realms/rail-ticketing/protocol/openid-connect/certs"
+
+  # Kafka
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+
+  # Redis
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+
+  # Database host
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+
+  # Observability
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+  OTEL_TRACES_SAMPLER: "always_on"
+  OTEL_METRICS_EXPORTER: "none"
+  OTEL_LOGS_EXPORTER: "none"
+
+  # Feature flags
+  INVENTORY_REDIS_ENABLED: "true"
+  QUOTA_REDIS_ENABLED: "true"
+  QUEUE_ENFORCEMENT_ENABLED: "true"
+
+  # Waiting room
+  RELEASE_RATE: "50"
+  RELEASE_INTERVAL_MS: "500"

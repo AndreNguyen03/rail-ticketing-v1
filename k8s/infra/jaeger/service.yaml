@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: rail-ticketing
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - name: ui
+      port: 16686
+      targetPort: 16686
+    - name: otlp
+      port: 4318
+      targetPort: 4318
+  type: ClusterIP

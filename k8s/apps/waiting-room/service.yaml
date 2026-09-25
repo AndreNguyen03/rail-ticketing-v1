@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: waiting-room
+  namespace: rail-ticketing
+spec:
+  selector:
+    app: waiting-room
+  ports:
+    - port: 8085
+      targetPort: 8085
+  type: ClusterIP

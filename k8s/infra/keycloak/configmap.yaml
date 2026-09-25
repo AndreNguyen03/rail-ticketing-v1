@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  namespace: rail-ticketing
+data:
+  rail-ticketing-realm.json: |
+    {
+      "realm": "rail-ticketing",
+      "enabled": true,
+      "sslRequired": "none",
+      "verifyEmail": false,
+      "loginWithEmailAllowed": false,
+      "clients": [
+        {
+          "clientId": "rail-gateway",
+          "name": "Rail Ticketing Gateway",
+          "enabled": true,
+          "publicClient": true,
+          "directAccessGrantsEnabled": true,
+          "standardFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "protocol": "openid-connect"
+        }
+      ],
+      "requiredActions": [
+        { "alias": "VERIFY_EMAIL", "name": "Verify Email", "enabled": false, "defaultAction": false, "providerId": "VERIFY_EMAIL" },
+        { "alias": "UPDATE_PROFILE", "name": "Update Profile", "enabled": false, "defaultAction": false, "providerId": "UPDATE_PROFILE" },
+        { "alias": "CONFIGURE_TOTP", "name": "Configure OTP", "enabled": false, "defaultAction": false, "providerId": "CONFIGURE_TOTP" },
+        { "alias": "UPDATE_PASSWORD", "name": "Update Password", "enabled": true, "defaultAction": false, "providerId": "UPDATE_PASSWORD" },
+        { "alias": "TERMS_AND_CONDITIONS", "name": "Terms and Conditions", "enabled": false, "defaultAction": false, "providerId": "TERMS_AND_CONDITIONS" }
+      ],
+      "users": [
+        {
+          "username": "testuser", "enabled": true, "emailVerified": true,
+          "email": "testuser@railticketing.vn", "firstName": "Test", "lastName": "User",
+          "requiredActions": [],
+          "credentials": [{ "type": "password", "value": "testpass", "temporary": false }]
+        },
+        {
+          "username": "scalper", "enabled": true, "emailVerified": true,
+          "email": "scalper@railticketing.vn", "firstName": "Scalper", "lastName": "Bot",
+          "requiredActions": [],
+          "credentials": [{ "type": "password", "value": "scalper123", "temporary": false }]
+        }
+      ]
+    }
