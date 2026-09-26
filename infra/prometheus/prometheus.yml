@@ -37,3 +37,13 @@ scrape_configs:
     metrics_path: /actuator/prometheus
     static_configs:
       - targets: ['quota-service:8086']
+
+  - job_name: ticket-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['ticket-service:8088']
+
+  - job_name: notification-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['notification-service:8089']

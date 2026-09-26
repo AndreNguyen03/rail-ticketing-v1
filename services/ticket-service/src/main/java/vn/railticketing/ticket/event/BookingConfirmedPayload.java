@@ -1,9 +1,9 @@
-package vn.railticketing.booking.event;
+package vn.railticketing.ticket.event;
 
 import java.util.List;
 import java.util.UUID;
 
-public record BookingConfirmedEvent(
+public record BookingConfirmedPayload(
         UUID   bookingId,
         String status,
         Long   tripId,

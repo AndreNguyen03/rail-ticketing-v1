@@ -423,6 +423,62 @@ services:
       jaeger:
         condition: service_started
 
+  ticket-service:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/ticket-service/Dockerfile
+    container_name: rt-ticket
+    ports:
+      - "8088:8088"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ticket_user
+      DB_PASSWORD: ticket_pw
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OTEL_SERVICE_NAME: ticket-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8088/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+  notification-service:
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: rt-notification
+    ports:
+      - "8089:8089"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OTEL_SERVICE_NAME: notification-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: always_on
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    depends_on:
+      kafka:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
 volumes:
   pgdata:
   grafana-data:

@@ -20,6 +20,8 @@
     <module>services/payment-service</module>
     <module>services/quota-service</module>
     <module>services/fare-service</module>
+    <module>services/ticket-service</module>
+    <module>services/notification-service</module>
   </modules>
 
   <properties>

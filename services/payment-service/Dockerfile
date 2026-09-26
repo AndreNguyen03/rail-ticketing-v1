@@ -8,6 +8,8 @@ COPY services/inventory-service/pom.xml services/inventory-service/
 COPY services/booking-service/pom.xml services/booking-service/
 COPY services/quota-service/pom.xml services/quota-service/
 COPY services/fare-service/pom.xml services/fare-service/
+COPY services/ticket-service/pom.xml services/ticket-service/
+COPY services/notification-service/pom.xml services/notification-service/
 RUN mvn -B -pl services/payment-service -am dependency:go-offline
 COPY services/payment-service/src services/payment-service/src
 RUN mvn -B -pl services/payment-service -am package -DskipTests

@@ -6,18 +6,22 @@ CREATE USER schedule_user  WITH PASSWORD 'schedule_pw';
 CREATE USER inventory_user WITH PASSWORD 'inventory_pw';
 CREATE USER booking_user   WITH PASSWORD 'booking_pw';
 CREATE USER quota_user     WITH PASSWORD 'quota_pw';
+CREATE USER ticket_user    WITH PASSWORD 'ticket_pw';
 
 CREATE DATABASE scheduledb  OWNER schedule_user;
 CREATE DATABASE inventorydb OWNER inventory_user;
 CREATE DATABASE bookingdb   OWNER booking_user;
 CREATE DATABASE quotadb     OWNER quota_user;
+CREATE DATABASE ticketdb    OWNER ticket_user;
 
 REVOKE CONNECT ON DATABASE scheduledb  FROM PUBLIC;
 REVOKE CONNECT ON DATABASE inventorydb FROM PUBLIC;
 REVOKE CONNECT ON DATABASE bookingdb   FROM PUBLIC;
 REVOKE CONNECT ON DATABASE quotadb     FROM PUBLIC;
+REVOKE CONNECT ON DATABASE ticketdb    FROM PUBLIC;
 
 GRANT CONNECT ON DATABASE scheduledb  TO schedule_user;
 GRANT CONNECT ON DATABASE inventorydb TO inventory_user;
 GRANT CONNECT ON DATABASE bookingdb   TO booking_user;
 GRANT CONNECT ON DATABASE quotadb     TO quota_user;
+GRANT CONNECT ON DATABASE ticketdb    TO ticket_user;

@@ -123,7 +123,16 @@ public class BookingPersistenceService {
         booking.setHoldId(null);
         booking.setExpiresAt(null);
         Booking saved = bookingRepository.save(booking);
-        String payload = toJson(new BookingConfirmedEvent(saved.getBookingId(), "CONFIRMED"));
+        List<BookingConfirmedEvent.TicketInfo> ticketInfos = saved.getTickets().stream()
+                .map(t -> new BookingConfirmedEvent.TicketInfo(
+                        t.getTicketId(), t.getBerthId(),
+                        t.getCarriageNo(), t.getBerthNo(),
+                        t.getPassengerName(), t.getPassengerIdNumber(),
+                        t.getPassengerType(), t.getPriceVnd()))
+                .toList();
+        String payload = toJson(new BookingConfirmedEvent(
+                saved.getBookingId(), "CONFIRMED", saved.getTripId(),
+                saved.getContactEmail(), saved.getContactName(), ticketInfos));
         outboxRepository.save(Outbox.create("booking", saved.getBookingId(), "BookingConfirmed", payload));
         return saved;
     }

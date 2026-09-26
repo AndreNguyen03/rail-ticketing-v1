@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: notification-service
+  threads:
+    virtual:
+      enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+
+server:
+  port: ${SERVER_PORT:8089}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+  tracing:
+    enabled: true
+    sampling:
+      probability: 1.0
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://jaeger:4318}/v1/traces
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://jaeger:4318}/v1/traces
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [${spring.application.name},%X{traceId:-},%X{spanId:-}] %logger{36} - %msg%n"
