@@ -1,7 +1,6 @@
 package vn.railticketing.fare.service;
 
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.HttpClientErrorException;
 import vn.railticketing.fare.client.ScheduleClient;
 import vn.railticketing.fare.client.dto.BerthDto;
 import vn.railticketing.fare.client.dto.CarriageDto;
@@ -11,6 +10,7 @@ import vn.railticketing.fare.web.dto.FareByClassDto;
 import vn.railticketing.fare.web.dto.FareResponse;
 import vn.railticketing.fare.web.dto.RefundPolicyResponse;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.*;
@@ -65,7 +65,7 @@ public class FareService {
     // Calculate refund amount for a ticket price given the departure time.
     public long calculateRefundAmount(long ticketPriceVnd, OffsetDateTime departureAt) {
         if (departureAt == null) return ticketPriceVnd; // unknown departure → full refund
-        long hoursUntilDeparture = java.time.Duration
+        long hoursUntilDeparture = Duration
                 .between(Instant.now(), departureAt.toInstant())
                 .toHours();
 
